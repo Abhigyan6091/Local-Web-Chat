@@ -26,17 +26,46 @@ When connected to the **IIT Bhilai network**, the application can be accessed at
 
 ## Quick Start
 
-To run the application locally, execute the following command from the project root:
+### 1. Clone the Repository
+
+Clone the repository and navigate to the project directory:
+
+```bash
+git clone https://github.com/maharshisoni24/web_chat.git
+cd web_chat
+````
+
+### 2. Install Frontend Dependencies
+
+Since `node_modules` is not included in the repository, install the required Node.js dependencies:
+
+```bash
+npm install
+```
+
+### 3. Install Backend Dependencies
+
+Install the required Python dependencies:
+
+```bash
+pip install -r server/requirements.txt
+```
+
+### 4. Run the Application
+
+Start both the frontend and backend with a single command:
 
 ```bash
 npm run dev
-````
+```
+
+The application will start the frontend and backend together.
 
 Alternatively, on Windows, you can double-click `start.bat`.
 
 | Service           | URL                            |
 | ----------------- | ------------------------------ |
-| Frontend UI       | `http://localhost:5173`        |
+| Frontend UI       | `http://localhost:5000`        |
 | Backend WebSocket | `ws://localhost:8000/ws`       |
 | Health Check      | `http://localhost:8000/health` |
 
