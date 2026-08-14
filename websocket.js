@@ -4,8 +4,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 window.WS = (function () {
-  var host = window.location.hostname || 'localhost';
-  var WS_URL = 'ws://' + host + ':8000/ws';
+  var protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  var WS_URL = protocol + '//' + window.location.host + '/ws';
 
   var _ws             = null;
   var _onMessage      = function () {};
