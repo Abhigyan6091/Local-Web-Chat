@@ -1,0 +1,17 @@
+{
+  "name": "group-chat-app",
+  "version": "1.0.0",
+  "description": "Real-time Group Chat Frontend (WebSocket-ready)",
+  "scripts": {
+    "dev": "concurrently -n \"BACKEND,FRONTEND\" -c \"yellow,cyan\" \"python -m uvicorn server.main:app --host 0.0.0.0 --port 8000 --reload\" \"vite --host 0.0.0.0\"",
+    "start": "npm run dev",
+    "backend": "python -m uvicorn server.main:app --host 0.0.0.0 --port 8000 --reload",
+    "frontend": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.4",
+    "vite": "^5.2.0"
+  }
+}

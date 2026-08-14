@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>GroupChat — Real-time Chat</title>
+  <meta name="description" content="A real-time group chat application with private rooms and persistent messages." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- ─── JOIN SCREEN ─────────────────────────────────────── -->
+  <div id="join-screen" class="screen active">
+    <div class="join-card">
+      <div class="join-logo">
+        <span class="logo-icon">💬</span>
+        <h1>GroupChat</h1>
+        <p>Real-time messaging with private rooms</p>
+      </div>
+      <form id="join-form" autocomplete="off">
+        <div class="input-group">
+          <label for="username-input">Your Username</label>
+          <input
+            id="username-input"
+            type="text"
+            placeholder="e.g. Rahul, Priya, Arjun..."
+            maxlength="20"
+            required
+          />
+          <span class="input-hint">3–20 characters, letters and numbers only</span>
+        </div>
+        <button id="join-btn" type="submit" class="btn-primary">
+          Join Chat Room →
+        </button>
+      </form>
+      <p id="join-error" class="error-msg" hidden></p>
+    </div>
+  </div>
+
+  <!-- ─── CHAT SCREEN ──────────────────────────────────────── -->
+  <div id="chat-screen" class="screen">
+
+    <!-- Sidebar -->
+    <aside id="sidebar" class="sidebar">
+      <div class="sidebar-header">
+        <h2>GroupChat</h2>
+        <span id="status-badge" class="status-badge connecting">Connecting…</span>
+      </div>
+
+      <!-- Rooms Section -->
+      <div class="sidebar-section rooms-section">
+        <div class="section-header">
+          <p class="sidebar-label">Chat Rooms</p>
+        </div>
+        <ul id="rooms-list" class="rooms-list">
+          <li class="room-item active" data-room-id="global">
+            <span class="room-icon">🌐</span>
+            <span class="room-name">General Room</span>
+          </li>
+        </ul>
+
+        <div class="room-actions">
+          <button id="btn-create-room-trigger" class="btn-room-action">+ New Room</button>
+          <button id="btn-join-room-trigger" class="btn-room-action secondary">🔑 Join Code</button>
+        </div>
+      </div>
+
+      <!-- Online Users Section -->
+      <div class="sidebar-section users-section">
+        <p class="sidebar-label">Online Users</p>
+        <ul id="users-list" class="users-list"></ul>
+      </div>
+
+      <div class="sidebar-footer">
+        <div class="my-info">
+          <span class="avatar" id="my-avatar"></span>
+          <span id="my-username-display"></span>
+        </div>
+        <button id="leave-btn" class="btn-leave" title="Leave chat">✕ Leave</button>
+      </div>
+    </aside>
+
+    <!-- Main Chat Area -->
+    <main class="chat-main">
+      <header class="chat-header">
+        <button id="sidebar-toggle" class="sidebar-toggle" aria-label="Toggle sidebar">☰</button>
+        <div class="chat-header-info">
+          <div class="room-title-row">
+            <span id="chat-room-name" class="chat-room-name">🌐 General Room</span>
+            <span id="room-code-badge" class="room-code-badge" title="Click to copy room code" hidden>
+              Code: <strong id="room-code-val"></strong> 📋
+            </span>
+          </div>
+          <span id="user-count-label" class="user-count-label">0 online</span>
+        </div>
+        <span id="header-status" class="header-status connecting" title="Connecting…">●</span>
+      </header>
+
+      <div id="messages-area" class="messages-area">
+        <div class="messages-start-label">
+          <span>— Start of conversation —</span>
+        </div>
+      </div>
+
+      <footer class="chat-footer">
+        <form id="message-form" autocomplete="off">
+          <input
+            id="message-input"
+            type="text"
+            placeholder="Type a message…"
+            maxlength="500"
+            disabled
+          />
+          <button id="send-btn" type="submit" class="btn-send" disabled>Send</button>
+        </form>
+      </footer>
+    </main>
+
+  </div>
+
+  <!-- ─── MODALS ───────────────────────────────────────────── -->
+
+  <!-- Create Room Modal -->
+  <div id="create-room-modal" class="modal-overlay" hidden>
+    <div class="modal-card">
+      <h3>Create Private Room</h3>
+      <p class="modal-desc">Create a private room and invite others with a 6-character room code.</p>
+      <form id="create-room-form">
+        <div class="input-group">
+          <label for="create-room-name-input">Room Name</label>
+          <input id="create-room-name-input" type="text" placeholder="e.g. Gaming Hub, Project Alpha..." maxlength="30" required />
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn-modal-cancel" id="btn-cancel-create">Cancel</button>
+          <button type="submit" class="btn-primary modal-submit">Create Room</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Join Room Modal -->
+  <div id="join-room-modal" class="modal-overlay" hidden>
+    <div class="modal-card">
+      <h3>Join Private Room</h3>
+      <p class="modal-desc">Enter the 6-character room code provided by the room creator.</p>
+      <form id="join-room-form">
+        <div class="input-group">
+          <label for="join-room-code-input">Room Code</label>
+          <input id="join-room-code-input" type="text" placeholder="e.g. X8K9P2" maxlength="6" style="text-transform: uppercase; letter-spacing: 0.1em; font-weight: bold;" required />
+        </div>
+        <p id="join-room-error" class="error-msg" hidden></p>
+        <div class="modal-actions">
+          <button type="button" class="btn-modal-cancel" id="btn-cancel-join">Cancel</button>
+          <button type="submit" class="btn-primary modal-submit">Join Room</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Toast notification -->
+  <div id="toast-notification" class="toast" hidden></div>
+
+  <!-- Scripts loaded in order -->
+  <script src="websocket.js"></script>
+  <script src="main.js"></script>
+</body>
+</html>
