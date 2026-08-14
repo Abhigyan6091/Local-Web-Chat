@@ -1,58 +1,117 @@
 # GroupChat Application
 
-A real-time group chat application built with **Vite + Vanilla JS** (frontend), **FastAPI + WebSockets** (backend), and **SQLite** for persistent message & room storage.
+A real-time group chat application built with **Vite + Vanilla JavaScript** for the frontend, **FastAPI + WebSockets** for the backend, and **SQLite** for persistent message and room storage.
 
 ---
 
-## 🚀 Features
+## Features
 
-- **🌐 Global Chat**: Everyone joins the default `General Room` on connect.
-- **🔒 Private Rooms**: Create private rooms with shareable 6-character room codes (e.g. `X8K9P2`).
-- **🔑 Join by Code**: Enter a 6-character code to instantly enter any private room.
-- **💾 SQLite Persistence**: All messages and rooms are stored in `server/chat.db` and persist across server restarts and browser reloads.
-- **📱 100% Mobile Responsive**: Fixed viewport positioning, smooth mobile drawer sidebar, and touch-friendly controls.
+- **Global Chat:** Everyone joins the default `General Room` when they connect.
+- **Private Rooms:** Create private rooms with shareable 6-character room codes, such as `X8K9P2`.
+- **Join by Code:** Enter a 6-character room code to instantly join a private room.
+- **SQLite Persistence:** Messages and rooms are stored in `server/chat.db` and persist across server restarts and browser reloads.
+- **Mobile Responsive:** Responsive layout with a mobile-friendly sidebar, drawer navigation, and touch-friendly controls.
 
 ---
 
-## ⚡ Quick Start
+## Deployment
 
-Run a single command from the project root:
+The application is deployed on an **IIT Bhilai SSH server**.
+
+When connected to the **IIT Bhilai network**, the application can be accessed at:
+
+**http://10.1.75.53:5201**
+
+---
+
+## Quick Start
+
+To run the application locally, execute the following command from the project root:
 
 ```bash
 npm run dev
+````
+
+Alternatively, on Windows, you can double-click `start.bat`.
+
+| Service           | URL                            |
+| ----------------- | ------------------------------ |
+| Frontend UI       | `http://localhost:5173`        |
+| Backend WebSocket | `ws://localhost:8000/ws`       |
+| Health Check      | `http://localhost:8000/health` |
+
+For the deployed application, access the frontend through:
+
+```text
+http://10.1.75.53:5201
 ```
-*(or double-click `start.bat`)*
 
-| Service | URL |
-|---------|-----|
-| **Frontend UI** | **http://localhost:5173** (or `http://<YOUR_LAN_IP>:5173` on Wi-Fi) |
-| **Backend WebSocket** | **ws://localhost:8000/ws** |
-| **Health Check** | **http://localhost:8000/health** |
+when connected to the IIT Bhilai network.
 
 ---
 
-## 📡 WebSocket Protocol
+## WebSocket Protocol
 
-Client sends JSON messages over `ws://<HOST>:8000/ws`:
+The client communicates with the backend through WebSockets.
 
-| Action | Sent JSON Payload |
-|--------|-------------------|
-| **Join Server** | `{ "type": "join", "username": "name" }` |
-| **Create Private Room** | `{ "type": "create_room", "name": "Room Name" }` |
-| **Join Room by Code** | `{ "type": "join_room", "code": "X8K9P2" }` |
-| **Switch Room** | `{ "type": "switch_room", "roomId": "room_123" }` |
-| **Send Chat Message** | `{ "type": "message", "text": "Hello world!" }` |
+### Join Server
+
+```json
+{
+  "type": "join",
+  "username": "name"
+}
+```
+
+### Create Private Room
+
+```json
+{
+  "type": "create_room",
+  "name": "Room Name"
+}
+```
+
+### Join Room by Code
+
+```json
+{
+  "type": "join_room",
+  "code": "X8K9P2"
+}
+```
+
+### Switch Room
+
+```json
+{
+  "type": "switch_room",
+  "roomId": "room_123"
+}
+```
+
+### Send Chat Message
+
+```json
+{
+  "type": "message",
+  "text": "Hello world!"
+}
+```
 
 ---
 
-## 📁 File Structure
+## File Structure
 
-| File | Purpose |
-|------|---------|
-| `index.html` | Chat UI, Room list section, Create/Join room modals |
-| `style.css` | Styling — Mobile flex layout, Dark theme, Room badges, Modals |
-| `main.js` | UI logic — Room switching, message history rendering, modals |
-| `websocket.js` | Client WebSocket API — Room creation & connection logic |
-| `server/main.py` | FastAPI WebSocket server — Multi-room broadcasting & handlers |
-| `server/database.py` | SQLite DB manager — Persistent rooms & message history |
-| `server/chat.db` | Local SQLite database file |
+| File                 | Purpose                                                                     |
+| -------------------- | --------------------------------------------------------------------------- |
+| `index.html`         | Chat UI, room list, and create/join room modals                             |
+| `style.css`          | Application styling, responsive layout, dark theme, room badges, and modals |
+| `main.js`            | UI logic, room switching, message history rendering, and modal handling     |
+| `websocket.js`       | WebSocket client and room communication logic                               |
+| `server/main.py`     | FastAPI WebSocket server, multi-room management, and message handlers       |
+| `server/database.py` | SQLite database manager for persistent rooms and message history            |
+| `server/chat.db`     | SQLite database containing persistent application data                      |
+
+```
+```
