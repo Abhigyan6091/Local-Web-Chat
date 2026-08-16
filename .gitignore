@@ -1,2 +1,12 @@
 node_modules/
+
+__pycache__/
+*.py[cod]
+
+server/chat.db
+
 server/secret.key
+
+.env
+.env.*
+!.env.example
