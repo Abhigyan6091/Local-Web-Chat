@@ -429,3 +429,16 @@ messagesArea.addEventListener('click', function () {
 // ── Init ──────────────────────────────────────────────────────────────────────
 showScreen('join');
 usernameInput.focus();
+
+// ── Keep header pinned when mobile keyboard opens ──────────────────────────
+function setAppHeight() {
+  var h = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+  document.documentElement.style.setProperty('--app-height', h + 'px');
+}
+setAppHeight();
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', setAppHeight);
+  window.visualViewport.addEventListener('scroll', setAppHeight);
+} else {
+  window.addEventListener('resize', setAppHeight);
+}
