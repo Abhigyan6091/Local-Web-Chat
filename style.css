@@ -697,3 +697,25 @@ input  { font-family: var(--font); }
     flex-shrink: 0;
   }
 }
+
+/* ──────────────────────────────────────────────
+   Message verification badges (encryption/signature)
+────────────────────────────────────────────── */
+.msg-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 0.05rem 0.4rem;
+  border-radius: 99px;
+}
+
+.msg-badge.verified {
+  color: var(--online-dot);
+  background: rgba(34, 197, 94, 0.12);
+}
+
+.msg-badge.tampered {
+  color: var(--error);
+  background: rgba(248, 113, 113, 0.12);
+}

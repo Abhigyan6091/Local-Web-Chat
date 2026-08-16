@@ -100,7 +100,10 @@ function appendSystemMessage(text) {
 }
 
 // ── Render chat bubble ───────────────────────────────────────────────────────
-function appendChatMessage(sender, text, isMe, timestamp) {
+// verified/tampered are optional — undefined for messages sent live in this
+// session (server marks those verified=true), and set from DB history for
+// old messages that went through decrypt + signature check on the backend.
+function appendChatMessage(sender, text, isMe, timestamp, verified, tampered) {
   var row = document.createElement('div');
   row.className = 'msg-row ' + (isMe ? 'me' : 'other');
 
@@ -117,6 +120,20 @@ function appendChatMessage(sender, text, isMe, timestamp) {
   var timeEl = document.createElement('span');
   timeEl.textContent = formatTime(timestamp);
   meta.appendChild(timeEl);
+
+  if (tampered) {
+    var tamperBadge = document.createElement('span');
+    tamperBadge.className = 'msg-badge tampered';
+    tamperBadge.title = 'Message integrity check failed';
+    tamperBadge.textContent = '⚠ tampered';
+    meta.appendChild(tamperBadge);
+  } else if (verified) {
+    var verifiedBadge = document.createElement('span');
+    verifiedBadge.className = 'msg-badge verified';
+    verifiedBadge.title = 'Signature verified';
+    verifiedBadge.textContent = '✓ verified';
+    meta.appendChild(verifiedBadge);
+  }
 
   var bubble = document.createElement('div');
   bubble.className = 'msg-bubble';
@@ -238,7 +255,7 @@ function handleEvent(event) {
     messagesArea.innerHTML = '<div class="messages-start-label"><span>— Start of conversation —</span></div>';
     if (event.history && event.history.length > 0) {
       event.history.forEach(function (msg) {
-        appendChatMessage(msg.sender, msg.text, msg.sender === myUsername, msg.timestamp);
+        appendChatMessage(msg.sender, msg.text, msg.sender === myUsername, msg.timestamp, msg.verified, msg.tampered);
       });
     }
 
@@ -255,7 +272,7 @@ function handleEvent(event) {
 
   } else if (event.type === 'message') {
     if (event.roomId === currentRoomId) {
-      appendChatMessage(event.sender, event.text, event.sender === myUsername, event.timestamp);
+      appendChatMessage(event.sender, event.text, event.sender === myUsername, event.timestamp, event.verified, event.tampered);
     }
 
   } else if (event.type === 'user_joined') {

@@ -10,6 +10,7 @@ import string
 import time
 from pathlib import Path
 from typing import List, Dict, Optional
+import crypto_utils as crypto
 
 DB_PATH = Path(__file__).parent / "chat.db"
 
@@ -43,7 +44,10 @@ def init_db() -> None:
                 room_id TEXT NOT NULL,
                 sender TEXT NOT NULL,
                 sender_id TEXT NOT NULL,
-                text TEXT NOT NULL,
+                ciphertext TEXT NOT NULL,
+                nonce TEXT NOT NULL,
+                signature TEXT NOT NULL,
+                sender_public_key TEXT NOT NULL,
                 timestamp INTEGER NOT NULL,
                 FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE
             )
@@ -143,13 +147,17 @@ def get_all_rooms() -> List[Dict]:
 
 
 def save_message(room_id: str, sender: str, sender_id: str, text: str, timestamp: int) -> Dict:
-    """Save a chat message to DB."""
+    """Encrypts + signs the message, then stores it. Never writes plaintext to disk."""
+    ciphertext, nonce = crypto.encrypt_message(text)
+    signature = crypto.sign_message(sender, text)
+    public_key = crypto.get_public_key_b64(sender)
+
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO messages (room_id, sender, sender_id, text, timestamp)
-            VALUES (?, ?, ?, ?, ?)
-        """, (room_id, sender, sender_id, text, timestamp))
+            INSERT INTO messages (room_id, sender, sender_id, ciphertext, nonce, signature, sender_public_key, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (room_id, sender, sender_id, ciphertext, nonce, signature, public_key, timestamp))
         conn.commit()
         msg_id = cursor.lastrowid
 
@@ -158,32 +166,41 @@ def save_message(room_id: str, sender: str, sender_id: str, text: str, timestamp
         "room_id": room_id,
         "sender": sender,
         "senderId": sender_id,
-        "text": text,
-        "timestamp": timestamp
+        "text": text,          # plaintext only used for the live broadcast
+        "timestamp": timestamp,
+        "verified": True,
+        "tampered": False,
     }
 
 
 def get_room_messages(room_id: str, limit: int = 100) -> List[Dict]:
-    """Retrieve recent message history for a room."""
+    """Retrieve history: decrypt ciphertext + verify signature for every row."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id, room_id, sender, sender_id, text, timestamp
+            SELECT id, room_id, sender, sender_id, ciphertext, nonce, signature, sender_public_key, timestamp
             FROM messages
             WHERE room_id = ?
             ORDER BY id ASC
             LIMIT ?
         """, (room_id, limit))
         rows = cursor.fetchall()
-        return [
-            {
-                "type": "message",
-                "id": r["id"],
-                "roomId": r["room_id"],
-                "sender": r["sender"],
-                "senderId": r["sender_id"],
-                "text": r["text"],
-                "timestamp": r["timestamp"]
-            }
-            for r in rows
-        ]
+
+    result = []
+    for r in rows:
+        plaintext = crypto.decrypt_message(r["ciphertext"], r["nonce"])
+        tampered = plaintext is None
+        verified = crypto.verify_signature(r["sender_public_key"], plaintext, r["signature"]) if not tampered else False
+
+        result.append({
+            "type": "message",
+            "id": r["id"],
+            "roomId": r["room_id"],
+            "sender": r["sender"],
+            "senderId": r["sender_id"],
+            "text": plaintext if not tampered else "⚠️ [TAMPERED — cannot decrypt]",
+            "timestamp": r["timestamp"],
+            "verified": verified,
+            "tampered": tampered,
+        })
+    return result

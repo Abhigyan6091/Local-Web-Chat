@@ -174,17 +174,18 @@ class RoomConnectionManager:
         sender_id = client["id"]
         now = int(time.time() * 1000)
 
-        # Save to SQLite DB
+        # Encrypt + sign + persist (all crypto happens inside save_message)
         msg_record = db.save_message(room_id, username, sender_id, text, now)
 
-        # Broadcast to room members
         payload = {
             "type": "message",
             "roomId": room_id,
             "sender": username,
             "senderId": sender_id,
-            "text": text,
-            "timestamp": now
+            "text": msg_record["text"],
+            "timestamp": now,
+            "verified": msg_record["verified"],
+            "tampered": msg_record["tampered"],
         }
         await self.broadcast_to_room(room_id, payload)
 
