@@ -1,0 +1,63 @@
+{
+  "mode": "distributed_lab",
+  "description": "Multi-system network deployment configuration across the 4 allocated lab machines (Sys1, Sys2, Sys3, Sys4)",
+  "network_map": {
+    "Sys1": {
+      "role": "Load Balancer (Server)",
+      "ssh_port": 2237,
+      "internal_ip": "172.17.0.38",
+      "service_port": 8000
+    },
+    "Sys2": {
+      "role": "Backend Server 1",
+      "ssh_port": 2238,
+      "internal_ip": "172.17.0.39",
+      "service_port": 8000
+    },
+    "Sys3": {
+      "role": "Backend Server 2",
+      "ssh_port": 2239,
+      "internal_ip": "172.17.0.40",
+      "service_port": 8000
+    },
+    "Sys4": {
+      "role": "Backend Server 3",
+      "ssh_port": 2240,
+      "internal_ip": "172.17.0.41",
+      "service_port": 8000
+    }
+  },
+  "load_balancer": {
+    "host": "0.0.0.0",
+    "port": 8000,
+    "algorithm": "round_robin",
+    "health_check_interval_seconds": 3,
+    "health_check_timeout_seconds": 2.0,
+    "retry_attempts": 2
+  },
+  "backends": [
+    {
+      "id": "Sys2",
+      "host": "172.17.0.39",
+      "port": 8000,
+      "weight": 1
+    },
+    {
+      "id": "Sys3",
+      "host": "172.17.0.40",
+      "port": 8000,
+      "weight": 1
+    },
+    {
+      "id": "Sys4",
+      "host": "172.17.0.41",
+      "port": 8000,
+      "weight": 1
+    }
+  ],
+  "experiment_workload": {
+    "requests": 300,
+    "concurrency": 15,
+    "work_delay_ms": 20
+  }
+}

@@ -3,11 +3,12 @@
   "version": "1.0.0",
   "description": "Real-time Group Chat Frontend (WebSocket-ready) — Load Balanced",
   "scripts": {
-    "backend1": "python -m uvicorn server.main:app --host 0.0.0.0 --port 8001",
-    "backend2": "python -m uvicorn server.main:app --host 0.0.0.0 --port 8002",
-    "backend3": "python -m uvicorn server.main:app --host 0.0.0.0 --port 8003",
-    "loadbalancer": "python ../Distributed-Load-Balancer/src/load_balancer/balancer.py --host 0.0.0.0 --port 8000 --backends http://127.0.0.1:8001,http://127.0.0.1:8002,http://127.0.0.1:8003 --algorithm round_robin",
+    "backend1": "cross-env BACKEND_PORT=8001 python -m uvicorn server.main:app --host 0.0.0.0 --port 8001",
+    "backend2": "cross-env BACKEND_PORT=8002 python -m uvicorn server.main:app --host 0.0.0.0 --port 8002",
+    "backend3": "cross-env BACKEND_PORT=8003 python -m uvicorn server.main:app --host 0.0.0.0 --port 8003",
+    "loadbalancer": "python load_balancer/balancer.py --host 0.0.0.0 --port 8000 --backends http://127.0.0.1:8001,http://127.0.0.1:8002,http://127.0.0.1:8003 --algorithm ip_hash",
     "frontend": "vite --host 0.0.0.0 --port 5000",
+    "logs": "python logs.py",
     "dev": "concurrently -n \"BACKEND1,BACKEND2,BACKEND3,LB,FRONTEND\" -c \"blue,cyan,green,yellow,magenta\" \"npm run backend1\" \"npm run backend2\" \"npm run backend3\" \"npm run loadbalancer\" \"npm run frontend\"",
     "start": "npm run dev",
     "build": "vite build",
@@ -15,6 +16,7 @@
   },
   "devDependencies": {
     "concurrently": "^10.0.4",
+    "cross-env": "^7.0.3",
     "vite": "^5.2.0"
   }
 }

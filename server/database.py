@@ -1,18 +1,28 @@
 """
 database.py — SQLite persistence layer for Group Chat
 =====================================================
-Stores persistent rooms and chat message history in server/chat.db
+Stores persistent rooms and chat message history.
+Each backend instance uses its own DB file (chat_PORT.db) to avoid
+SQLite write contention when multiple backends share the same directory.
 """
 
+import os
 import sqlite3
 import random
 import string
 import time
 from pathlib import Path
 from typing import List, Dict, Optional
-import crypto_utils as crypto
+try:
+    import crypto_utils as crypto
+except ImportError:
+    from server import crypto_utils as crypto
 
-DB_PATH = Path(__file__).parent / "chat.db"
+# Use a per-port DB file so 3 backend instances don't fight over one SQLite file.
+# The uvicorn port is passed in via BACKEND_PORT env var (set in start.bat / package.json).
+_port = os.environ.get("BACKEND_PORT", "")
+_db_filename = f"chat_{_port}.db" if _port else "chat.db"
+DB_PATH = Path(__file__).parent / _db_filename
 
 
 def get_db_connection() -> sqlite3.Connection:

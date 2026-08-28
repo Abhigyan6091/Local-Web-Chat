@@ -18,6 +18,11 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import sys
 from pathlib import Path
+import logging
+
+logging.getLogger("asyncio").setLevel(logging.CRITICAL)
+
+
 server_dir = Path(__file__).parent
 if str(server_dir) not in sys.path:
     sys.path.insert(0, str(server_dir))
