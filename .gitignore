@@ -1,10 +1,9 @@
 node_modules/
-
+.pytest_cache/
 __pycache__/
 *.py[cod]
 
-server/chat.db
-
+server/*.db
 server/secret.key
 
 .env

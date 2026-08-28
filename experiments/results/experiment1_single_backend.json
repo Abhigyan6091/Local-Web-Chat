@@ -1,0 +1,26 @@
+{
+  "experiment_name": "Experiment 1 - Single Backend (Sys2)",
+  "total_requests": 300,
+  "successful_requests": 300,
+  "failed_requests": 0,
+  "error_rate_pct": 0.0,
+  "duration_seconds": 1.508,
+  "throughput_rps": 199.0,
+  "latency_ms": {
+    "min": 2.75,
+    "avg": 58.34,
+    "max": 797.78,
+    "p50": 21.8,
+    "p90": 48.07,
+    "p95": 524.7,
+    "p99": 713.88
+  },
+  "backend_distribution": {
+    "Sys2": 300
+  },
+  "status_codes": {
+    "200": 203,
+    "201": 97
+  },
+  "timestamp": "2026-08-21 09:46:26"
+}
