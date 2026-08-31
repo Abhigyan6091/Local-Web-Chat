@@ -5,6 +5,11 @@ A real-time web-based group chat application built with **FastAPI, WebSockets, V
 The project supports deployment across multiple backend servers, with a dedicated frontend/load-balancer server distributing HTTP and WebSocket traffic among backend instances.
 
 ---
+## Running Application
+
+The currently deployed application is available at **http://10.1.75.53:5201/** and can be accessed while connected to the **IIIT Bhilai network**.
+
+> **Live Application:** http://10.1.75.53:5201/ — accessible from the IIIT Bhilai network.
 
 ## Features
 
