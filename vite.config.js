@@ -6,24 +6,28 @@ export default defineConfig({
     port: 5000,
 
     proxy: {
-      // WebSocket connections — tunnelled through Load Balancer (port 8000)
+      // WebSocket connections -> Sys1 Python Load Balancer
       '/ws': {
-        target: 'ws://127.0.0.1:8000',
+        target: 'ws://127.0.0.1:6000',
         ws: true,
         changeOrigin: true,
       },
-      // Health & REST API — also routed through Load Balancer
+
+      // HTTP health endpoint -> Load Balancer
       '/health': {
-        target: 'http://127.0.0.1:8000',
+        target: 'http://127.0.0.1:6000',
         changeOrigin: true,
       },
+
+      // REST API -> Load Balancer
       '/api': {
-        target: 'http://127.0.0.1:8000',
+        target: 'http://127.0.0.1:6000',
         changeOrigin: true,
       },
-      // Load Balancer status endpoint
+
+      // Load Balancer status
       '/lb': {
-        target: 'http://127.0.0.1:8000',
+        target: 'http://127.0.0.1:6000',
         changeOrigin: true,
       },
     },
