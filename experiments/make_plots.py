@@ -171,8 +171,8 @@ def plot_capacity() -> None:
     ax.plot(users, rps, color=SERIES[0], marker="o")
     label_end(ax, users[-1], rps[-1], f"{rps[-1]:.0f} rps", SERIES[0])
     peak = max(range(len(rps)), key=lambda i: rps[i])
-    ax.annotate(f"peak {rps[peak]:.0f} rps @ {users[peak]} users",
-                xy=(users[peak], rps[peak]), xytext=(0, 14),
+    ax.annotate(f"peak {rps[peak]:.0f} rps\n@ {users[peak]} users",
+                xy=(users[peak], rps[peak]), xytext=(0, -30),
                 textcoords="offset points", ha="center", color=INK2, fontsize=9)
     style(ax, "Concurrent users", "Throughput (requests/s)", "Throughput vs offered load")
     ax.set_ylim(bottom=0)

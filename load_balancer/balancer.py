@@ -253,7 +253,7 @@ class ConnectionPool:
 class LoadBalancer:
     def __init__(self, host: str, port: int, nodes: List[BackendNode],
                  algorithm: str = "adaptive_threshold",
-                 threshold: float = 0.65, release_ratio: float = 0.80,
+                 threshold: float = 0.55, release_ratio: float = 0.80,
                  score_cfg: Optional[ScoreConfig] = None,
                  health_interval: float = 1.0, health_timeout: float = 1.0,
                  connect_timeout: float = 2.0, request_timeout: float = 30.0,
@@ -815,7 +815,7 @@ def main() -> None:
     ap.add_argument("--backends", required=True,
                     help="comma list, e.g. Sys2=http://172.17.0.39:4000,Sys3=...")
     ap.add_argument("--algorithm", default="adaptive_threshold")
-    ap.add_argument("--threshold", type=float, default=0.65)
+    ap.add_argument("--threshold", type=float, default=0.55)
     ap.add_argument("--release-ratio", type=float, default=0.80)
     ap.add_argument("--w-cpu", type=float, default=0.45)
     ap.add_argument("--w-conn", type=float, default=0.20)

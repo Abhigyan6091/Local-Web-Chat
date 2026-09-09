@@ -1,0 +1,242 @@
+{
+  "experiment": "threshold_repeat",
+  "repeats": 3,
+  "runs": [
+    {
+      "threshold": 0.3,
+      "trials": [
+        {
+          "rps": 253.9,
+          "p50_ms": 315.142,
+          "p95_ms": 689.416,
+          "p99_ms": 1059.317,
+          "errors": 0,
+          "split": {
+            "Sys3": 3528,
+            "Sys4": 3687,
+            "Sys2": 504
+          },
+          "integrity": {
+            "rows": 6219,
+            "distinct_message_ids": 6219
+          }
+        },
+        {
+          "rps": 250.69,
+          "p50_ms": 303.877,
+          "p95_ms": 714.329,
+          "p99_ms": 1206.18,
+          "errors": 0,
+          "split": {
+            "Sys3": 3873,
+            "Sys4": 3075,
+            "Sys2": 683
+          },
+          "integrity": {
+            "rows": 6061,
+            "distinct_message_ids": 6061
+          }
+        },
+        {
+          "rps": 231.69,
+          "p50_ms": 347.468,
+          "p95_ms": 807.107,
+          "p99_ms": 1450.507,
+          "errors": 0,
+          "split": {
+            "Sys3": 3112,
+            "Sys4": 3421,
+            "Sys2": 510
+          },
+          "integrity": {
+            "rows": 5594,
+            "distinct_message_ids": 5594
+          }
+        }
+      ],
+      "rps_mean": 245.43,
+      "rps_min": 231.69,
+      "rps_max": 253.9,
+      "p95_mean": 736.95,
+      "p95_min": 689.42,
+      "p95_max": 807.11
+    },
+    {
+      "threshold": 0.55,
+      "trials": [
+        {
+          "rps": 236.77,
+          "p50_ms": 331.406,
+          "p95_ms": 775.317,
+          "p99_ms": 1419.476,
+          "errors": 0,
+          "split": {
+            "Sys3": 3432,
+            "Sys4": 3296,
+            "Sys2": 453
+          },
+          "integrity": {
+            "rows": 5726,
+            "distinct_message_ids": 5726
+          }
+        },
+        {
+          "rps": 257.79,
+          "p50_ms": 297.56,
+          "p95_ms": 617.894,
+          "p99_ms": 1567.189,
+          "errors": 0,
+          "split": {
+            "Sys3": 3742,
+            "Sys4": 3518,
+            "Sys2": 547
+          },
+          "integrity": {
+            "rows": 6226,
+            "distinct_message_ids": 6226
+          }
+        },
+        {
+          "rps": 248.08,
+          "p50_ms": 331.894,
+          "p95_ms": 690.963,
+          "p99_ms": 1201.207,
+          "errors": 0,
+          "split": {
+            "Sys3": 3440,
+            "Sys4": 3490,
+            "Sys2": 610
+          },
+          "integrity": {
+            "rows": 6039,
+            "distinct_message_ids": 6039
+          }
+        }
+      ],
+      "rps_mean": 247.55,
+      "rps_min": 236.77,
+      "rps_max": 257.79,
+      "p95_mean": 694.72,
+      "p95_min": 617.89,
+      "p95_max": 775.32
+    },
+    {
+      "threshold": 0.65,
+      "trials": [
+        {
+          "rps": 225.57,
+          "p50_ms": 358.057,
+          "p95_ms": 860.439,
+          "p99_ms": 1258.292,
+          "errors": 0,
+          "split": {
+            "Sys3": 2869,
+            "Sys4": 3518,
+            "Sys2": 487
+          },
+          "integrity": {
+            "rows": 5505,
+            "distinct_message_ids": 5505
+          }
+        },
+        {
+          "rps": 226.62,
+          "p50_ms": 335.664,
+          "p95_ms": 785.323,
+          "p99_ms": 1633.465,
+          "errors": 0,
+          "split": {
+            "Sys3": 3548,
+            "Sys4": 2800,
+            "Sys2": 527
+          },
+          "integrity": {
+            "rows": 5556,
+            "distinct_message_ids": 5556
+          }
+        },
+        {
+          "rps": 222.81,
+          "p50_ms": 361.934,
+          "p95_ms": 750.672,
+          "p99_ms": 2232.889,
+          "errors": 0,
+          "split": {
+            "Sys3": 3135,
+            "Sys4": 3290,
+            "Sys2": 342
+          },
+          "integrity": {
+            "rows": 5460,
+            "distinct_message_ids": 5460
+          }
+        }
+      ],
+      "rps_mean": 225.0,
+      "rps_min": 222.81,
+      "rps_max": 226.62,
+      "p95_mean": 798.81,
+      "p95_min": 750.67,
+      "p95_max": 860.44
+    },
+    {
+      "threshold": 0.85,
+      "trials": [
+        {
+          "rps": 243.87,
+          "p50_ms": 326.316,
+          "p95_ms": 759.179,
+          "p99_ms": 1472.863,
+          "errors": 0,
+          "split": {
+            "Sys3": 3621,
+            "Sys4": 3220,
+            "Sys2": 532
+          },
+          "integrity": {
+            "rows": 5896,
+            "distinct_message_ids": 5896
+          }
+        },
+        {
+          "rps": 224.94,
+          "p50_ms": 345.265,
+          "p95_ms": 930.927,
+          "p99_ms": 1572.83,
+          "errors": 0,
+          "split": {
+            "Sys3": 3440,
+            "Sys4": 2885,
+            "Sys2": 535
+          },
+          "integrity": {
+            "rows": 5476,
+            "distinct_message_ids": 5476
+          }
+        },
+        {
+          "rps": 229.01,
+          "p50_ms": 355.933,
+          "p95_ms": 729.316,
+          "p99_ms": 1171.726,
+          "errors": 0,
+          "split": {
+            "Sys3": 3014,
+            "Sys4": 3354,
+            "Sys2": 566
+          },
+          "integrity": {
+            "rows": 5521,
+            "distinct_message_ids": 5521
+          }
+        }
+      ],
+      "rps_mean": 232.61,
+      "rps_min": 224.94,
+      "rps_max": 243.87,
+      "p95_mean": 806.47,
+      "p95_min": 729.32,
+      "p95_max": 930.93
+    }
+  ]
+}

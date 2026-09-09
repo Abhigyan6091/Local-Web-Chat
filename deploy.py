@@ -71,6 +71,16 @@ DB_HOST = MACHINES[DB_NODE]["ip"]
 # key are derived from this, so all three backends can read each other's rows.
 CHAT_SECRET = "REDACTED-CLUSTER-SECRET"
 
+# Switching threshold on the balancer's composite load score.
+#
+# Chosen from experiments/results/threshold_moderate.json and
+# threshold_repeat.json. At 40 users throughput falls monotonically from
+# 216 rps at 0.30 to 175 rps at 1.20 as the balancer over-sticks (switch count
+# drops 1825 -> 37), and at 100 users the 0.30-0.55 band is the best of the
+# repeated trials. 0.30 and 0.55 are statistically tied at both load levels;
+# 0.55 is taken because it reaches the same throughput with fewer switches.
+DEFAULT_THRESHOLD = 0.55
+
 REMOTE_DIR = "/home/student/chatapp"
 PUBLIC_URL = f"http://{SSH_HOST}:{MACHINES['Sys1']['ext']}"
 
@@ -208,6 +218,11 @@ def deploy_backend(name: str) -> None:
         "export DB_POOL_MIN=4",
         "export DB_POOL_MAX=16",
         f"export CHAT_SECRET='{CHAT_SECRET}'",
+        # Ceiling on the in-memory feed cache. Each cached message costs roughly
+        # 1 KB across the item list, the concatenated body, the serialised
+        # response and the gzip copy, so 80k caps the cache near 80 MB. That
+        # matters most on Sys2, which shares its 512 MB with PostgreSQL.
+        "export FEED_MAX_ITEMS=80000",
         "export PYTHONUNBUFFERED=1",
     ])
     # One worker per node: each container is limited to a single CPU, so extra
@@ -230,7 +245,7 @@ def deploy_backend(name: str) -> None:
 
 
 # ── load balancer ────────────────────────────────────────────────────────────
-def deploy_loadbalancer(threshold: float = 0.65) -> None:
+def deploy_loadbalancer(threshold: float = DEFAULT_THRESHOLD) -> None:
     cfg = MACHINES["Sys1"]
     print(f"\n=== Load Balancer Sys1 ({cfg['ip']}:{SERVICE_PORT} -> public :{cfg['ext']}) ===")
     client = connect("Sys1")
@@ -321,7 +336,7 @@ def main() -> None:
     ap.add_argument("--status", action="store_true")
     ap.add_argument("--stop", action="store_true")
     ap.add_argument("--logs", metavar="NODE")
-    ap.add_argument("--threshold", type=float, default=0.65)
+    ap.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
     args = ap.parse_args()
 
     if args.status:

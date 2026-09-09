@@ -216,7 +216,7 @@ class AdaptiveThresholdAlgorithm(LoadBalancerAlgorithm):
 
     name = "adaptive_threshold"
 
-    def __init__(self, nodes=None, cfg=None, threshold: float = 0.65,
+    def __init__(self, nodes=None, cfg=None, threshold: float = 0.55,
                  release_ratio: float = 0.80, **kwargs):
         super().__init__(nodes, cfg)
         self.threshold = float(threshold)
