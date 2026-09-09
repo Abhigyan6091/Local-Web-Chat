@@ -118,6 +118,13 @@ deploy.py                     deployment to the four containers
 
 ## Running
 
+Credentials are not stored in the source. Create `.lab.env` first (it is
+git-ignored):
+
+```bash
+cp .lab.env.example .lab.env    # then fill in the lab SSH / database passwords
+```
+
 ```bash
 pip install -r requirements.txt
 

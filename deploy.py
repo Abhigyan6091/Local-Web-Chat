@@ -49,9 +49,7 @@ except ImportError:
     print("ERROR: paramiko not installed. Run: pip install paramiko")
     sys.exit(1)
 
-SSH_HOST = "10.1.75.79"
-SSH_USER = "student"
-SSH_PASS = "REDACTED"
+from lab_config import SSH_HOST, SSH_USER, SSH_PASSWORD as SSH_PASS, DB_PASSWORD, CHAT_SECRET
 
 SERVICE_PORT = 4000          # internal port -> forwarded to <4><ssh suffix>
 DB_PORT = 5432
@@ -67,9 +65,7 @@ BACKENDS = ["Sys2", "Sys3", "Sys4"]
 DB_NODE = "Sys2"                       # PostgreSQL lives beside the Sys2 backend
 DB_HOST = MACHINES[DB_NODE]["ip"]
 
-# Shared cluster secret: the AES-GCM data key and every user's Ed25519 signing
-# key are derived from this, so all three backends can read each other's rows.
-CHAT_SECRET = "REDACTED-CLUSTER-SECRET"
+
 
 # Switching threshold on the balancer's composite load score.
 #
@@ -183,7 +179,7 @@ def ensure_database() -> None:
         time.sleep(3)
         status = run(client, "pg_lsclusters 2>/dev/null | tail -1")
     print(f"  {status}")
-    probe = run(client, "PGPASSWORD=REDACTED psql -h 127.0.0.1 -U chatuser "
+    probe = run(client, f"PGPASSWORD={DB_PASSWORD} psql -h 127.0.0.1 -U chatuser "
                         "-d chatdb -tAc 'select count(*) from messages;' 2>&1 | tail -1")
     print(f"  messages currently stored: {probe}")
     client.close()
@@ -214,7 +210,7 @@ def deploy_backend(name: str) -> None:
         f"export DB_PORT={DB_PORT}",
         "export DB_NAME=chatdb",
         "export DB_USER=chatuser",
-        "export DB_PASSWORD=REDACTED",
+        f"export DB_PASSWORD={DB_PASSWORD}",
         "export DB_POOL_MIN=4",
         "export DB_POOL_MAX=16",
         f"export CHAT_SECRET='{CHAT_SECRET}'",

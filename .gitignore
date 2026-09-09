@@ -9,3 +9,6 @@ server/secret.key
 .env
 .env.*
 !.env.example
+
+# Lab credentials — never commit
+.lab.env

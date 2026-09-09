@@ -53,7 +53,7 @@ DB_HOST = os.environ.get("DB_HOST", "172.17.0.38")
 DB_PORT = int(os.environ.get("DB_PORT", "5432"))
 DB_NAME = os.environ.get("DB_NAME", "chatdb")
 DB_USER = os.environ.get("DB_USER", "chatuser")
-DB_PASSWORD = os.environ.get("DB_PASSWORD", "REDACTED")
+DB_PASSWORD = os.environ.get("DB_PASSWORD", "")
 
 POOL_MIN = int(os.environ.get("DB_POOL_MIN", "8"))
 POOL_MAX = int(os.environ.get("DB_POOL_MAX", "40"))

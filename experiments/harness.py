@@ -27,6 +27,7 @@ import paramiko
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from deploy import (MACHINES, BACKENDS, DB_NODE, SERVICE_PORT, SSH_HOST,
                     SSH_USER, SSH_PASS, REMOTE_DIR, PUBLIC_URL)
+from lab_config import DB_PASSWORD
 
 RESULTS_DIR = Path(__file__).parent / "results"
 
@@ -49,9 +50,9 @@ def run(client: paramiko.SSHClient, cmd: str, timeout: int = 120) -> str:
 
 def truncate_messages() -> int:
     client = connect(DB_NODE)
-    run(client, "PGPASSWORD=REDACTED psql -h 127.0.0.1 -U chatuser -d chatdb "
+    run(client, f"PGPASSWORD={DB_PASSWORD} psql -h 127.0.0.1 -U chatuser -d chatdb "
                 "-c 'TRUNCATE TABLE messages RESTART IDENTITY;'")
-    remaining = run(client, "PGPASSWORD=REDACTED psql -h 127.0.0.1 -U chatuser "
+    remaining = run(client, f"PGPASSWORD={DB_PASSWORD} psql -h 127.0.0.1 -U chatuser "
                             "-d chatdb -tAc 'select count(*) from messages;'")
     client.close()
     try:
@@ -117,7 +118,7 @@ def lb_status() -> Dict[str, Any]:
 
 def db_message_count() -> int:
     client = connect(DB_NODE)
-    out = run(client, "PGPASSWORD=REDACTED psql -h 127.0.0.1 -U chatuser -d chatdb "
+    out = run(client, f"PGPASSWORD={DB_PASSWORD} psql -h 127.0.0.1 -U chatuser -d chatdb "
                       "-tAc 'select count(*) from messages;'")
     client.close()
     try:
@@ -129,9 +130,9 @@ def db_message_count() -> int:
 def db_duplicate_check() -> Dict[str, int]:
     """Confirms the uniqueness guarantee actually held during a run."""
     client = connect(DB_NODE)
-    total = run(client, "PGPASSWORD=REDACTED psql -h 127.0.0.1 -U chatuser -d chatdb "
+    total = run(client, f"PGPASSWORD={DB_PASSWORD} psql -h 127.0.0.1 -U chatuser -d chatdb "
                         "-tAc 'select count(*) from messages;'")
-    distinct = run(client, "PGPASSWORD=REDACTED psql -h 127.0.0.1 -U chatuser -d chatdb "
+    distinct = run(client, f"PGPASSWORD={DB_PASSWORD} psql -h 127.0.0.1 -U chatuser -d chatdb "
                            "-tAc 'select count(distinct message_id) from messages;'")
     client.close()
 
