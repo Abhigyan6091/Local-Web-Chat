@@ -46,16 +46,18 @@ WORDS = ("hello", "there", "team", "meeting", "deadline", "assignment", "server"
 
 
 def random_message(min_len: int, max_len: int) -> str:
-    """A random-length, human-looking message body."""
+    """A random-length, human-looking message body of exactly `target` chars."""
     target = random.randint(min_len, max_len)
     parts: List[str] = []
     size = 0
     while size < target:
-        w = random.choice(WORDS)
-        parts.append(w)
-        size += len(w) + 1
-    text = " ".join(parts)[:target]
-    return text or random.choice(WORDS)
+        word = random.choice(WORDS)
+        # Count the separator only between words, never after the last one --
+        # counting a trailing space that " ".join never emits leaves the result
+        # one character short and can undershoot min_len.
+        size += len(word) if not parts else len(word) + 1
+        parts.append(word)
+    return " ".join(parts)[:target]
 
 
 @dataclass
