@@ -31,7 +31,6 @@ from pathlib import Path
 from typing import Dict, Set, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Response
-from fastapi.middleware.cors import CORSMiddleware
 
 server_dir = Path(__file__).parent
 for extra in (str(server_dir), str(server_dir.parent)):
@@ -69,12 +68,6 @@ FEED_MAX_ITEMS = int(os.environ.get("FEED_MAX_ITEMS", "150000"))
 JSON_HEADERS = {"Access-Control-Allow-Origin": "*"}
 
 app = FastAPI(title="Distributed Secure Group Chat — Backend Node", version="4.0.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 # ── Live load accounting ─────────────────────────────────────────────────────
@@ -101,16 +94,31 @@ class NodeLoad:
 load = NodeLoad()
 
 
-@app.middleware("http")
-async def track_load(request: Request, call_next):
-    load.inflight += 1
-    load.total_requests += 1
-    t0 = time.perf_counter()
-    try:
-        return await call_next(request)
-    finally:
-        load.inflight -= 1
-        load.observe((time.perf_counter() - t0) * 1000.0)
+class LoadTrackingMiddleware:
+    """Raw ASGI middleware that keeps the per-node load counters current.
+
+    Deliberately not `@app.middleware("http")`: that wraps every request in a
+    Starlette BaseHTTPMiddleware, which spawns an anyio task group and a message
+    queue per request. On a one-core container that overhead is a measurable
+    fraction of the request budget. This does the same bookkeeping with a plain
+    function call, and passes lifespan and websocket scopes straight through.
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        load.inflight += 1
+        load.total_requests += 1
+        t0 = time.perf_counter()
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            load.inflight -= 1
+            load.observe((time.perf_counter() - t0) * 1000.0)
 
 
 # ── WebSocket room manager (unchanged chat semantics) ────────────────────────
@@ -519,3 +527,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     except Exception as exc:
         log.warning("websocket error: %s", exc)
         await manager.disconnect(ws)
+
+
+# The ASGI entrypoint uvicorn serves (`server.main:asgi_app`).
+asgi_app = LoadTrackingMiddleware(app)

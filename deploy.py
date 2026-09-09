@@ -212,7 +212,7 @@ def deploy_backend(name: str) -> None:
     ])
     # One worker per node: each container is limited to a single CPU, so extra
     # workers would only add context switching and duplicate feed caches.
-    command = (f"python3 -m uvicorn server.main:app --host 0.0.0.0 "
+    command = (f"python3 -m uvicorn server.main:asgi_app --host 0.0.0.0 "
                f"--port {SERVICE_PORT} --workers 1 --loop uvloop "
                f"--http httptools --log-level warning --no-access-log "
                f"--backlog 2048 --timeout-keep-alive 30")

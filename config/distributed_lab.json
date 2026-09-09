@@ -1,63 +1,48 @@
 {
   "mode": "distributed_lab",
-  "description": "Multi-system network deployment configuration across the 4 allocated lab machines (Sys1, Sys2, Sys3, Sys4)",
+  "description": "Deployment map for the four allotted lab containers. Each container is limited by its cgroup to one CPU and 512 MB of memory, which is what the balancer's scoring is normalised against.",
+  "ssh": {
+    "host": "10.1.75.79",
+    "user": "student"
+  },
+  "port_mapping": {
+    "note": "The lab host forwards only internal ports 3000/4000/5000/6000/7000. The external port keeps the container's SSH suffix, so internal 4000 on the container reached via ssh port 2237 is published as 4237. Ports 8000/8080/9000 are NOT forwarded.",
+    "internal_service_port": 4000
+  },
+  "public_url": "http://10.1.75.79:4237",
+  "required_routes": {
+    "message": "POST http://10.1.75.79:4237/message",
+    "feed": "GET http://10.1.75.79:4237/feed"
+  },
   "network_map": {
-    "Sys1": {
-      "role": "Load Balancer (Server)",
-      "ssh_port": 2237,
-      "internal_ip": "172.17.0.38",
-      "service_port": 8000
-    },
-    "Sys2": {
-      "role": "Backend Server 1",
-      "ssh_port": 2238,
-      "internal_ip": "172.17.0.39",
-      "service_port": 8000
-    },
-    "Sys3": {
-      "role": "Backend Server 2",
-      "ssh_port": 2239,
-      "internal_ip": "172.17.0.40",
-      "service_port": 8000
-    },
-    "Sys4": {
-      "role": "Backend Server 3",
-      "ssh_port": 2240,
-      "internal_ip": "172.17.0.41",
-      "service_port": 8000
-    }
+    "Sys1": {"role": "Load balancer + chat UI", "ssh_port": 2237, "internal_ip": "172.17.0.38", "service_port": 4000, "public_port": 4237, "cpu_limit": 1, "mem_limit_mb": 512},
+    "Sys2": {"role": "Backend + PostgreSQL", "ssh_port": 2238, "internal_ip": "172.17.0.39", "service_port": 4000, "public_port": 4238, "cpu_limit": 1, "mem_limit_mb": 512},
+    "Sys3": {"role": "Backend", "ssh_port": 2239, "internal_ip": "172.17.0.40", "service_port": 4000, "public_port": 4239, "cpu_limit": 1, "mem_limit_mb": 512},
+    "Sys4": {"role": "Backend", "ssh_port": 2240, "internal_ip": "172.17.0.41", "service_port": 4000, "public_port": 4240, "cpu_limit": 1, "mem_limit_mb": 512}
+  },
+  "database": {
+    "engine": "PostgreSQL 16",
+    "host": "172.17.0.39",
+    "port": 5432,
+    "name": "chatdb",
+    "user": "chatuser",
+    "shared_by": ["Sys2", "Sys3", "Sys4"],
+    "uniqueness": "messages.message_id is the PRIMARY KEY; inserts use ON CONFLICT (message_id) DO NOTHING"
   },
   "load_balancer": {
     "host": "0.0.0.0",
-    "port": 8000,
-    "algorithm": "round_robin",
-    "health_check_interval_seconds": 3,
-    "health_check_timeout_seconds": 2.0,
+    "port": 4000,
+    "algorithm": "adaptive_threshold",
+    "threshold": 0.65,
+    "release_ratio": 0.8,
+    "score_weights": {"cpu": 0.45, "connections": 0.20, "latency": 0.30, "memory": 0.05},
+    "health_check_interval_seconds": 1.0,
+    "health_check_timeout_seconds": 1.0,
     "retry_attempts": 2
   },
   "backends": [
-    {
-      "id": "Sys2",
-      "host": "172.17.0.39",
-      "port": 8000,
-      "weight": 1
-    },
-    {
-      "id": "Sys3",
-      "host": "172.17.0.40",
-      "port": 8000,
-      "weight": 1
-    },
-    {
-      "id": "Sys4",
-      "host": "172.17.0.41",
-      "port": 8000,
-      "weight": 1
-    }
-  ],
-  "experiment_workload": {
-    "requests": 300,
-    "concurrency": 15,
-    "work_delay_ms": 20
-  }
+    {"id": "Sys2", "host": "172.17.0.39", "port": 4000, "weight": 1},
+    {"id": "Sys3", "host": "172.17.0.40", "port": 4000, "weight": 1},
+    {"id": "Sys4", "host": "172.17.0.41", "port": 4000, "weight": 1}
+  ]
 }
