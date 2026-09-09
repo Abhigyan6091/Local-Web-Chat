@@ -379,7 +379,13 @@ async def _extract_message(request: Request) -> tuple[str, str, Optional[str]]:
             str(message_id) if message_id else None)
 
 
+# The assignment fixes the path but not the verb or the encoding, so accept the
+# shapes a load generator might reasonably use: POST or GET, JSON, form-encoded
+# or query string, with or without a trailing slash.
 @app.post("/message")
+@app.get("/message")
+@app.post("/message/")
+@app.get("/message/")
 async def post_message(request: Request) -> Response:
     client_name, text, message_id = await _extract_message(request)
     if not text.strip():
@@ -427,6 +433,7 @@ async def post_message(request: Request) -> Response:
 
 
 @app.get("/feed")
+@app.get("/feed/")
 async def get_feed(request: Request, limit: int = 0) -> Response:
     """Every message in the shared conversation, oldest first."""
     if limit and limit > 0:

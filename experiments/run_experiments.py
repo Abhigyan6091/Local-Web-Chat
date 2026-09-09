@@ -73,19 +73,75 @@ async def exp_capacity(duration: float) -> Dict[str, Any]:
     return {"experiment": "capacity", "runs": out}
 
 
-async def exp_threshold(duration: float) -> Dict[str, Any]:
-    print("\n[threshold] switching threshold optimisation (users=100)")
+async def exp_threshold(duration: float, users: int = 100,
+                        tag: str = "") -> Dict[str, Any]:
+    print(f"\n[threshold{tag}] switching threshold optimisation (users={users})")
     out = []
     for thr in (0.30, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95, 1.20):
         harness.reset_cluster()
         harness.lb_config({"algorithm": "adaptive_threshold", "threshold": thr})
-        res = await one_run(make_cfg(100, duration), reset=False)
+        res = await one_run(make_cfg(users, duration), reset=False)
         routing = res["summary"]["lb_status_after"]["routing"]
         res["summary"]["threshold"] = thr
         res["summary"]["switch_count"] = routing.get("switch_count")
         line(res, f"threshold={thr:.2f}")
         out.append({"threshold": thr, **res["summary"]})
-    return {"experiment": "threshold", "runs": out}
+    return {"experiment": "threshold", "users": users, "runs": out}
+
+
+async def exp_threshold_moderate(duration: float) -> Dict[str, Any]:
+    """Sweep the threshold at partial load.
+
+    At 100 users every backend sits far above any threshold we would set, so the
+    policy is permanently in its "everything is saturated, take the least-loaded"
+    branch and the threshold barely gates a decision. The threshold only has room
+    to act when backends are near it, which is the moderate-load regime — so the
+    optimisation is repeated at 40 users.
+    """
+    return await exp_threshold(duration, users=40, tag="-moderate")
+
+
+async def exp_threshold_repeat(duration: float, repeats: int = 3) -> Dict[str, Any]:
+    """Repeat the leading threshold candidates.
+
+    A single 30 s run separates thresholds by less than the run-to-run spread on
+    this cluster, so the single-shot sweep can only narrow the field. This repeats
+    the shortlist and reports mean and spread, which is what the recommendation is
+    actually based on.
+    """
+    print(f"\n[threshold-repeat] {repeats} runs per candidate (users=100)")
+    out = []
+    for thr in (0.30, 0.55, 0.65, 0.85):
+        trials = []
+        for i in range(repeats):
+            harness.reset_cluster(verbose=False)
+            harness.lb_config({"algorithm": "adaptive_threshold", "threshold": thr})
+            res = await one_run(make_cfg(100, duration), reset=False)
+            s = res["summary"]
+            trials.append({"rps": s["throughput_rps"],
+                           "p50_ms": s["overall"]["p50_ms"],
+                           "p95_ms": s["overall"]["p95_ms"],
+                           "p99_ms": s["overall"]["p99_ms"],
+                           "errors": s["overall"]["failed"],
+                           "split": s["requests_per_backend"],
+                           "integrity": s["db_integrity"]})
+            print(f"    threshold={thr:.2f} run {i + 1}/{repeats}: "
+                  f"rps={trials[-1]['rps']:.1f} p95={trials[-1]['p95_ms']:.0f}ms")
+        rps = [t["rps"] for t in trials]
+        p95 = [t["p95_ms"] for t in trials]
+        agg = {
+            "threshold": thr,
+            "trials": trials,
+            "rps_mean": round(sum(rps) / len(rps), 2),
+            "rps_min": round(min(rps), 2), "rps_max": round(max(rps), 2),
+            "p95_mean": round(sum(p95) / len(p95), 2),
+            "p95_min": round(min(p95), 2), "p95_max": round(max(p95), 2),
+        }
+        print(f"  threshold={thr:.2f}  rps {agg['rps_mean']:.1f} "
+              f"[{agg['rps_min']:.0f}-{agg['rps_max']:.0f}]   "
+              f"p95 {agg['p95_mean']:.0f}ms [{agg['p95_min']:.0f}-{agg['p95_max']:.0f}]")
+        out.append(agg)
+    return {"experiment": "threshold_repeat", "repeats": repeats, "runs": out}
 
 
 async def exp_algorithms(duration: float) -> Dict[str, Any]:
@@ -153,7 +209,8 @@ async def exp_timeline(duration: float) -> Dict[str, Any]:
 
 async def amain() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("which", choices=["capacity", "threshold", "algorithms",
+    ap.add_argument("which", choices=["capacity", "threshold", "threshold-repeat",
+                                      "threshold-moderate", "algorithms",
                                       "failover", "timeline", "all"])
     ap.add_argument("--duration", type=float, default=30.0)
     args = ap.parse_args()
@@ -161,6 +218,8 @@ async def amain() -> None:
     jobs = {
         "capacity": (exp_capacity, "capacity.json"),
         "threshold": (exp_threshold, "threshold_sweep.json"),
+        "threshold-repeat": (exp_threshold_repeat, "threshold_repeat.json"),
+        "threshold-moderate": (exp_threshold_moderate, "threshold_moderate.json"),
         "algorithms": (exp_algorithms, "algorithm_comparison.json"),
         "failover": (exp_failover, "failover.json"),
         "timeline": (exp_timeline, "timeline.json"),

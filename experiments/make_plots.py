@@ -89,10 +89,64 @@ def save(fig, name: str) -> None:
     print(f"  wrote report/figures/{name}")
 
 
-def label_end(ax, x, y, text, color) -> None:
-    """Direct label at the end of a line, so identity is not colour-only."""
-    ax.annotate(f" {text}", xy=(x, y), xytext=(4, 0), textcoords="offset points",
+def label_end(ax, x, y, text, color, placed=None, min_gap_px=11.0) -> None:
+    """Direct label at the end of a line, so identity is not colour-only.
+
+    When several series finish at nearly the same value their labels would sit on
+    top of each other, so `placed` (a list carried across calls on one axis) is
+    used to nudge each new label clear of the ones already written.
+    """
+    dy = 0.0
+    if placed is not None:
+        y_px = ax.transData.transform((x, y))[1]
+        for prev in placed:
+            while abs((y_px + dy) - prev) < min_gap_px:
+                dy += min_gap_px if (y_px + dy) >= prev else -min_gap_px
+        placed.append(y_px + dy)
+    ax.annotate(f" {text}", xy=(x, y), xytext=(4, dy), textcoords="offset points",
                 color=color, fontsize=9, fontweight="bold", va="center")
+
+
+def node_series(metrics: List[Dict[str, Any]], node: str, field: str,
+                scale: float = 1.0) -> np.ndarray:
+    """Per-node series with unhealthy samples masked out.
+
+    While a backend is down the balancer has no fresh reading for it and keeps
+    the last one it saw. Plotting that would draw a flat line implying the dead
+    node was still doing work, so those samples become NaN and the line breaks.
+    """
+    out = []
+    for m in metrics:
+        entry = m["backends"].get(node)
+        if not entry or not entry.get("healthy", True):
+            out.append(np.nan)
+        else:
+            out.append(entry.get(field, 0) * scale)
+    return np.asarray(out, dtype=float)
+
+
+def unhealthy_spans(metrics: List[Dict[str, Any]], node: str):
+    """Time ranges over which `node` was reported unhealthy."""
+    spans, start = [], None
+    for m in metrics:
+        entry = m["backends"].get(node) or {}
+        down = not entry.get("healthy", True)
+        if down and start is None:
+            start = m["t_rel"]
+        elif not down and start is not None:
+            spans.append((start, m["t_rel"]))
+            start = None
+    if start is not None:
+        spans.append((start, metrics[-1]["t_rel"]))
+    return spans
+
+
+def last_finite(xs: np.ndarray, ys: np.ndarray):
+    """Right-most point where the series has data, for the direct label."""
+    idx = np.where(np.isfinite(ys))[0]
+    if len(idx) == 0:
+        return None, None
+    return xs[idx[-1]], ys[idx[-1]]
 
 
 def rolling(values: List[float], window: int) -> np.ndarray:
@@ -134,8 +188,9 @@ def plot_capacity() -> None:
     save(fig, "capacity.png")
 
 
-def plot_threshold() -> None:
-    data = load("threshold_sweep.json")
+def plot_threshold(source: str = "threshold_sweep.json",
+                   name: str = "threshold_sweep.png") -> None:
+    data = load(source)
     if not data:
         return
     runs = sorted(data["runs"], key=lambda r: r["threshold"])
@@ -149,12 +204,9 @@ def plot_threshold() -> None:
 
     ax = axes[0]
     ax.plot(thr, rps, color=SERIES[0], marker="o")
-    best = max(range(len(rps)), key=lambda i: rps[i])
-    ax.scatter([thr[best]], [rps[best]], s=120, facecolor="none",
-               edgecolor=SERIES[0], linewidth=2, zorder=5)
-    ax.annotate(f"best {rps[best]:.0f} rps\nat threshold {thr[best]:.2f}",
-                xy=(thr[best], rps[best]), xytext=(0, -34),
-                textcoords="offset points", ha="center", color=INK2, fontsize=9)
+    # No "best point" marker here on purpose: this is one run per threshold and
+    # the spread between runs is comparable to the spread between thresholds, so
+    # the peak is not meaningful. The repeated-trials figure is the evidence.
     style(ax, "Switching threshold", "Throughput (requests/s)", "Throughput vs threshold")
 
     ax = axes[1]
@@ -170,7 +222,52 @@ def plot_threshold() -> None:
     style(ax, "Switching threshold", "Backend switches during run",
           "Routing churn vs threshold")
     ax.tick_params(axis="x", rotation=45)
-    save(fig, "threshold_sweep.png")
+    users = data.get("users", 100)
+    fig.text(0.01, -0.05, f"One 30 s run per threshold at {users} concurrent users. "
+                          "Run-to-run spread is comparable to the differences shown, "
+                          "so this narrows the field rather than picking a winner.",
+             color=MUTED, fontsize=9)
+    save(fig, name)
+
+
+def plot_threshold_repeat() -> None:
+    data = load("threshold_repeat.json")
+    if not data:
+        return
+    runs = sorted(data["runs"], key=lambda r: r["threshold"])
+    thr = [r["threshold"] for r in runs]
+    x = np.arange(len(thr))
+    rps_mean = [r["rps_mean"] for r in runs]
+    rps_lo = [r["rps_mean"] - r["rps_min"] for r in runs]
+    rps_hi = [r["rps_max"] - r["rps_mean"] for r in runs]
+    p95_mean = [r["p95_mean"] for r in runs]
+    p95_lo = [r["p95_mean"] - r["p95_min"] for r in runs]
+    p95_hi = [r["p95_max"] - r["p95_mean"] for r in runs]
+    n = data.get("repeats", 3)
+
+    fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.3))
+    ax = axes[0]
+    ax.errorbar(x, rps_mean, yerr=[rps_lo, rps_hi], color=SERIES[0], marker="o",
+                capsize=5, linewidth=2, elinewidth=1.4)
+    for xi, v in zip(x, rps_mean):
+        ax.annotate(f"{v:.0f}", xy=(xi, v), xytext=(0, 12),
+                    textcoords="offset points", ha="center", fontsize=9, color=INK2)
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"{t:.2f}" for t in thr])
+    style(ax, "Switching threshold", "Throughput (requests/s)",
+          f"Throughput — mean of {n} runs, bars show min/max")
+
+    ax = axes[1]
+    ax.errorbar(x, p95_mean, yerr=[p95_lo, p95_hi], color=SERIES[1], marker="o",
+                capsize=5, linewidth=2, elinewidth=1.4)
+    for xi, v in zip(x, p95_mean):
+        ax.annotate(f"{v:.0f}", xy=(xi, v), xytext=(0, 12),
+                    textcoords="offset points", ha="center", fontsize=9, color=INK2)
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"{t:.2f}" for t in thr])
+    style(ax, "Switching threshold", "p95 response time (ms)",
+          f"Tail latency — mean of {n} runs, bars show min/max")
+    save(fig, "threshold_repeat.png")
 
 
 def plot_algorithms() -> None:
@@ -240,17 +337,21 @@ def _timeline_axes(run: Dict[str, Any], title_suffix: str = "") -> None:
         lb = [m["lb"]["cpu"] * 100 for m in metrics]
         ax.plot(t, lb, color=NODE_COLOR["Sys1"], label="Sys1 (load balancer)")
         label_end(ax, t[-1], lb[-1], "Sys1", NODE_COLOR["Sys1"])
+        ta = np.asarray(t, dtype=float)
+        placed = []
         for node in ("Sys2", "Sys3", "Sys4"):
-            ys = [m["backends"].get(node, {}).get("cpu", 0) * 100 for m in metrics]
-            ax.plot(t, ys, color=NODE_COLOR[node], label=f"{node} (backend)")
-            label_end(ax, t[-1], ys[-1], node, NODE_COLOR[node])
+            ys = node_series(metrics, node, "cpu", 100.0)
+            ax.plot(ta, ys, color=NODE_COLOR[node], label=f"{node} (backend)")
+            lx, ly = last_finite(ta, ys)
+            if lx is not None:
+                label_end(ax, lx, ly, node, NODE_COLOR[node], placed)
         ax.axhline(100, color=MUTED, linewidth=1, linestyle=":")
         ax.annotate("1 CPU = 100%", xy=(0, 100), xytext=(2, 4),
                     textcoords="offset points", color=MUTED, fontsize=9)
     style(ax, "Time (s)", "CPU utilisation (% of the container's 1 core)",
           "System utilisation of all four systems")
-    ax.set_ylim(0, 130)
-    ax.legend(loc="lower right", ncol=2)
+    ax.set_ylim(0, 138)
+    ax.legend(loc="upper center", ncol=4, bbox_to_anchor=(0.5, -0.16))
     return fig
 
 
@@ -269,14 +370,18 @@ def plot_timeline() -> None:
         ax.plot(t, [m["lb"]["mem"] * 100 for m in metrics],
                 color=NODE_COLOR["Sys1"], label="Sys1 (load balancer)")
         label_end(ax, t[-1], metrics[-1]["lb"]["mem"] * 100, "Sys1", NODE_COLOR["Sys1"])
+        ta = np.asarray(t, dtype=float)
+        placed = []
         for node in ("Sys2", "Sys3", "Sys4"):
-            ys = [m["backends"].get(node, {}).get("mem", 0) * 100 for m in metrics]
-            ax.plot(t, ys, color=NODE_COLOR[node], label=f"{node} (backend)")
-            label_end(ax, t[-1], ys[-1], node, NODE_COLOR[node])
+            ys = node_series(metrics, node, "mem", 100.0)
+            ax.plot(ta, ys, color=NODE_COLOR[node], label=f"{node} (backend)")
+            lx, ly = last_finite(ta, ys)
+            if lx is not None:
+                label_end(ax, lx, ly, node, NODE_COLOR[node], placed)
         style(ax, "Time (s)", "Memory used (% of the container's 512 MB)",
               "Memory utilisation of all four systems")
-        ax.set_ylim(0, 110)
-        ax.legend(loc="lower right", ncol=2)
+        ax.set_ylim(0, 115)
+        ax.legend(loc="upper center", ncol=4, bbox_to_anchor=(0.5, -0.22))
         save(fig, "memory.png")
 
 
@@ -289,10 +394,14 @@ def plot_routing_share() -> None:
         return
     fig, ax = plt.subplots(figsize=(11, 4.0))
     t = [m["t_rel"] for m in metrics]
+    ta = np.asarray(t, dtype=float)
+    placed = []
     for node in ("Sys2", "Sys3", "Sys4"):
-        ys = [m["backends"].get(node, {}).get("score", 0) for m in metrics]
-        ax.plot(t, ys, color=NODE_COLOR[node], label=node)
-        label_end(ax, t[-1], ys[-1], node, NODE_COLOR[node])
+        ys = node_series(metrics, node, "score")
+        ax.plot(ta, ys, color=NODE_COLOR[node], label=node)
+        lx, ly = last_finite(ta, ys)
+        if lx is not None:
+            label_end(ax, lx, ly, node, NODE_COLOR[node], placed)
     thr = metrics[0].get("threshold")
     if thr:
         ax.axhline(thr, color=INK2, linewidth=1.4, linestyle="--")
@@ -334,17 +443,25 @@ def plot_failover() -> None:
 
     ax = axes[1]
     if metrics:
-        t = [m["t_rel"] for m in metrics]
+        ta = np.asarray([m["t_rel"] for m in metrics], dtype=float)
+        for lo, hi in unhealthy_spans(metrics, "Sys4"):
+            for panel in axes:
+                panel.axvspan(lo, hi, color="#e34948", alpha=0.07, linewidth=0)
+            ax.annotate("Sys4 detected unhealthy\nand removed from rotation",
+                        xy=((lo + hi) / 2, 118), ha="center", color=INK2, fontsize=9)
+        placed = []
         for node in ("Sys2", "Sys3", "Sys4"):
-            ys = [m["backends"].get(node, {}).get("cpu", 0) * 100 for m in metrics]
-            ax.plot(t, ys, color=NODE_COLOR[node], label=node)
-            label_end(ax, t[-1], ys[-1], node, NODE_COLOR[node])
+            ys = node_series(metrics, node, "cpu", 100.0)
+            ax.plot(ta, ys, color=NODE_COLOR[node], label=node)
+            lx, ly = last_finite(ta, ys)
+            if lx is not None:
+                label_end(ax, lx, ly, node, NODE_COLOR[node], placed)
         for ev in events:
             ax.axvline(ev["t"], color=INK2, linestyle="--", linewidth=1.2)
     style(ax, "Time (s)", "CPU utilisation (%)",
-          "Backend CPU — surviving nodes absorb the load")
-    ax.set_ylim(0, 130)
-    ax.legend(loc="upper right", ncol=3)
+          "Backend CPU — the line breaks while a node is out of rotation")
+    ax.set_ylim(0, 138)
+    ax.legend(loc="lower right", ncol=3)
     save(fig, "failover.png")
 
 
@@ -372,12 +489,17 @@ def plot_backend_share() -> None:
 
 def main() -> None:
     print("generating figures...")
-    for fn in (plot_capacity, plot_threshold, plot_algorithms, plot_timeline,
-               plot_routing_share, plot_failover, plot_backend_share):
+    jobs = [plot_capacity, plot_threshold,
+            lambda: plot_threshold("threshold_moderate.json",
+                                   "threshold_moderate.png"),
+            plot_threshold_repeat, plot_algorithms, plot_timeline,
+            plot_routing_share, plot_failover, plot_backend_share]
+    for fn in jobs:
         try:
             fn()
         except Exception as exc:
-            print(f"  {fn.__name__} failed: {type(exc).__name__}: {exc}")
+            print(f"  {getattr(fn, '__name__', 'figure')} failed: "
+                  f"{type(exc).__name__}: {exc}")
     print("done")
 
 
