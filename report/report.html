@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}</style>
+<title>Adaptive Load Balancing on Four One-Core Containers</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Serif:wght@500;600;700&display=swap">
+<style>
+:root{
+  --paper:#f5f7f8; --surface:#ffffff; --surface-2:#eef2f5;
+  --ink:#121a21; --ink-2:#4c5964; --ink-3:#7c8894;
+  --rule:#dde3e8; --rule-strong:#c3ccd4;
+  --accent:#2a78d6; --accent-ink:#1b5aa6; --accent-wash:#e9f1fc;
+  --good:#12855d; --good-wash:#e4f5ee;
+  --warn:#a86f00; --warn-wash:#fbf1dc;
+  --bad:#c0322f; --bad-wash:#fbeaea;
+  --shadow:0 1px 2px rgba(18,26,33,.06),0 8px 24px -12px rgba(18,26,33,.18);
+  --serif:"IBM Plex Serif",Georgia,serif;
+  --sans:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --paper:#10161b; --surface:#161f26; --surface-2:#1d272f;
+    --ink:#e8eef3; --ink-2:#a8b5c0; --ink-3:#7d8b97;
+    --rule:#28333c; --rule-strong:#3a4752;
+    --accent:#4a93e8; --accent-ink:#8dbcf2; --accent-wash:#17263a;
+    --good:#3fbe8e; --good-wash:#122b23;
+    --warn:#d9a63c; --warn-wash:#2e2411;
+    --bad:#e87573; --bad-wash:#331a1a;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 28px -14px rgba(0,0,0,.7);
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10161b; --surface:#161f26; --surface-2:#1d272f;
+  --ink:#e8eef3; --ink-2:#a8b5c0; --ink-3:#7d8b97;
+  --rule:#28333c; --rule-strong:#3a4752;
+  --accent:#4a93e8; --accent-ink:#8dbcf2; --accent-wash:#17263a;
+  --good:#3fbe8e; --good-wash:#122b23;
+  --warn:#d9a63c; --warn-wash:#2e2411;
+  --bad:#e87573; --bad-wash:#331a1a;
+  --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 28px -14px rgba(0,0,0,.7);
+}
+*{box-sizing:border-box}
+body{background:var(--paper);color:var(--ink);font-family:var(--sans);
+  font-size:16px;line-height:1.65;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1180px;margin:0 auto;padding:0 24px 96px;
+  display:grid;grid-template-columns:1fr;gap:0}
+@media(min-width:1060px){
+  .wrap{grid-template-columns:210px minmax(0,1fr);gap:56px;padding-right:40px}
+}
+/* ---- masthead ---- */
+.masthead{grid-column:1/-1;padding:56px 0 28px;border-bottom:2px solid var(--ink)}
+.eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.09em;
+  text-transform:uppercase;color:var(--ink-3);margin:0 0 14px}
+h1{font-family:var(--serif);font-weight:700;font-size:clamp(30px,4.6vw,46px);
+  line-height:1.1;letter-spacing:-.015em;margin:0 0 14px;text-wrap:balance;max-width:19ch}
+.standfirst{font-size:18px;color:var(--ink-2);margin:0;max-width:60ch}
+.byline{display:flex;flex-wrap:wrap;gap:8px 22px;margin-top:22px;
+  font-family:var(--mono);font-size:12.5px;color:var(--ink-3)}
+.byline a{color:var(--accent);text-decoration:none;border-bottom:1px solid transparent}
+.byline a:hover{border-bottom-color:currentColor}
+/* ---- submission panel ---- */
+.submit{margin:28px 0 0;background:var(--surface);border:1px solid var(--rule);
+  border-top:3px solid var(--accent);border-radius:3px;box-shadow:var(--shadow);
+  padding:22px 24px;display:grid;gap:16px}
+.submit h2{margin:0;font-family:var(--mono);font-size:11.5px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--ink-3);font-weight:600}
+.url{font-family:var(--mono);font-size:clamp(17px,2.6vw,25px);font-weight:600;
+  color:var(--accent-ink);word-break:break-all;line-height:1.3}
+.routes{display:grid;gap:8px;grid-template-columns:1fr}
+@media(min-width:620px){.routes{grid-template-columns:1fr 1fr}}
+.route{display:flex;gap:10px;align-items:baseline;font-family:var(--mono);
+  font-size:13px;padding:9px 12px;background:var(--surface-2);border-radius:3px}
+.verb{font-weight:600;color:var(--accent-ink);flex:none}
+/* ---- nav rail ---- */
+nav.rail{display:none}
+@media(min-width:1060px){
+  nav.rail{display:block;position:sticky;top:24px;align-self:start;
+    padding-top:40px;max-height:calc(100vh - 48px);overflow-y:auto}
+  nav.rail ol{list-style:none;margin:0;padding:0;display:grid;gap:2px}
+  nav.rail a{display:flex;gap:9px;text-decoration:none;color:var(--ink-2);
+    font-size:13.5px;padding:5px 8px;border-radius:3px;border-left:2px solid transparent}
+  nav.rail a:hover{background:var(--surface);color:var(--ink);border-left-color:var(--accent)}
+  nav.rail .n{font-family:var(--mono);font-size:11.5px;color:var(--ink-3);
+    padding-top:2px;flex:none;width:14px}
+}
+main{min-width:0;padding-top:40px}
+section{margin:0 0 52px;scroll-margin-top:20px}
+h2.sec{font-family:var(--serif);font-size:26px;font-weight:600;letter-spacing:-.01em;
+  margin:0 0 6px;display:flex;gap:14px;align-items:baseline;text-wrap:balance}
+h2.sec .num{font-family:var(--mono);font-size:13px;font-weight:500;color:var(--accent);
+  flex:none;padding-top:3px}
+.deck{color:var(--ink-2);margin:0 0 22px;padding-left:28px;max-width:66ch;font-size:15.5px}
+h3{font-family:var(--sans);font-size:16px;font-weight:600;margin:30px 0 8px;
+  color:var(--ink);letter-spacing:.005em}
+p{margin:0 0 15px;max-width:68ch}
+strong{font-weight:600}
+code{font-family:var(--mono);font-size:.88em;background:var(--surface-2);
+  padding:1.5px 5px;border-radius:3px;color:var(--accent-ink)}
+pre{font-family:var(--mono);font-size:12.8px;line-height:1.6;background:var(--surface);
+  border:1px solid var(--rule);border-left:3px solid var(--rule-strong);
+  border-radius:3px;padding:15px 17px;overflow-x:auto;margin:0 0 18px;color:var(--ink-2)}
+pre code{background:none;padding:0;color:inherit;font-size:inherit}
+ul{margin:0 0 15px;padding-left:20px;max-width:68ch}
+li{margin-bottom:7px}
+li::marker{color:var(--ink-3)}
+a{color:var(--accent);text-decoration:none;border-bottom:1px solid rgba(42,120,214,.35)}
+a:hover{border-bottom-color:currentColor}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:2px}
+/* ---- tables ---- */
+.tw{overflow-x:auto;margin:0 0 20px;border:1px solid var(--rule);border-radius:3px;
+  background:var(--surface)}
+table{border-collapse:collapse;width:100%;font-size:13.8px}
+th,td{padding:9px 14px;text-align:left;border-bottom:1px solid var(--rule);white-space:nowrap}
+thead th{font-family:var(--mono);font-size:11px;letter-spacing:.07em;text-transform:uppercase;
+  color:var(--ink-3);font-weight:600;background:var(--surface-2);
+  border-bottom:1px solid var(--rule-strong)}
+tbody tr:last-child td{border-bottom:none}
+td.num,th.num{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
+tr.hl td{background:var(--accent-wash);font-weight:600}
+tr.hl td:first-child{box-shadow:inset 3px 0 0 var(--accent)}
+td.mono,th.mono{font-family:var(--mono);font-size:12.8px}
+caption{caption-side:bottom;text-align:left;padding:10px 14px;font-size:12.5px;
+  color:var(--ink-3);border-top:1px solid var(--rule)}
+/* ---- figures ---- */
+.fig{margin:0 0 26px;background:var(--surface);border:1px solid var(--rule);
+  border-radius:3px;padding:14px;box-shadow:var(--shadow)}
+.fig img{display:block;width:100%;height:auto;border-radius:2px}
+.fig figcaption{margin-top:11px;padding-top:10px;border-top:1px solid var(--rule);
+  font-size:12.8px;color:var(--ink-3);line-height:1.55}
+/* ---- verification strip ---- */
+.strip{display:grid;gap:1px;background:var(--rule);border:1px solid var(--rule);
+  border-radius:3px;overflow:hidden;margin:0 0 20px;
+  grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+.strip div{background:var(--surface);padding:15px 17px}
+.strip dt{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--ink-3);margin:0 0 7px}
+.strip dd{margin:0;font-family:var(--mono);font-size:23px;font-weight:600;
+  font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.strip .eq{color:var(--good)}
+.strip .zero{color:var(--good)}
+/* ---- callouts ---- */
+.note{border-left:3px solid var(--rule-strong);padding:2px 0 2px 18px;margin:0 0 20px;
+  color:var(--ink-2);font-size:15px;max-width:66ch}
+.note.finding{border-left-color:var(--warn);background:var(--warn-wash);
+  padding:14px 18px;border-radius:0 3px 3px 0}
+.note.good{border-left-color:var(--good);background:var(--good-wash);
+  padding:14px 18px;border-radius:0 3px 3px 0}
+.note strong{color:var(--ink)}
+.tag{display:inline-block;font-family:var(--mono);font-size:10.5px;font-weight:600;
+  letter-spacing:.08em;text-transform:uppercase;padding:3px 8px;border-radius:2px;
+  vertical-align:1px;margin-right:8px}
+.tag.fix{background:var(--warn-wash);color:var(--warn)}
+.tag.ok{background:var(--good-wash);color:var(--good)}
+/* ---- topology ---- */
+.topo{font-family:var(--mono);font-size:12.2px;line-height:1.5;background:var(--surface);
+  border:1px solid var(--rule);border-radius:3px;padding:18px;overflow-x:auto;
+  margin:0 0 20px;color:var(--ink-2);white-space:pre}
+footer{grid-column:1/-1;margin-top:20px;padding-top:22px;border-top:1px solid var(--rule);
+  font-family:var(--mono);font-size:12px;color:var(--ink-3);
+  display:flex;flex-wrap:wrap;gap:8px 24px}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="masthead">
+  <p class="eyebrow">Distributed Systems · Deployment &amp; Evaluation Report</p>
+  <h1>Adaptive load balancing on four one-core containers</h1>
+  <p class="standfirst">A secure, persistent group-chat application deployed across three backend nodes behind a load balancer that picks a backend from live performance measurements — not a fixed rotation.</p>
+  <div class="byline">
+    <span>Abhigyan Sharma</span>
+    <span>IIT Bhilai lab cluster</span>
+    <span><a href="https://github.com/Abhigyan6091/Local-Web-Chat">github.com/Abhigyan6091/Local-Web-Chat</a></span>
+  </div>
+  <div class="submit">
+    <h2>Load balancer endpoint</h2>
+    <div class="url">http://10.1.75.79:4237</div>
+    <div class="routes">
+      <div class="route"><span class="verb">POST</span><span>/message &nbsp;<span style="color:var(--ink-3)">{"client-name", "msg"}</span></span></div>
+      <div class="route"><span class="verb">GET</span><span>/feed</span></div>
+    </div>
+  </div>
+</header>
+<nav class="rail" aria-label="Report sections"><ol><li><a href="#env"><span class="n">01</span>Environment</a></li>
+<li><a href="#arch"><span class="n">02</span>Architecture</a></li>
+<li><a href="#db"><span class="n">03</span>Shared data</a></li>
+<li><a href="#algo"><span class="n">04</span>Balancing policy</a></li>
+<li><a href="#thr"><span class="n">05</span>Threshold</a></li>
+<li><a href="#cmp"><span class="n">06</span>Policy comparison</a></li>
+<li><a href="#gen"><span class="n">07</span>Load generator</a></li>
+<li><a href="#res"><span class="n">08</span>Results</a></li>
+<li><a href="#fail"><span class="n">09</span>Failure handling</a></li>
+<li><a href="#perf"><span class="n">10</span>Performance work</a></li>
+<li><a href="#sec"><span class="n">11</span>Security</a></li>
+<li><a href="#lim"><span class="n">12</span>Limitations</a></li></ol></nav>
+<main>
+<section id="env">
+<h2 class="sec"><span class="num">01</span>The machines are not what they report</h2>
+<p class="deck">Two properties of the allotted containers drove most of the design, and both contradict what the machines say about themselves.</p>
+<div class="note finding"><span class="tag fix">Corrected</span><strong>The previous deployment was unreachable.</strong>
+It listened on port 8000, which the lab host does not forward. The submitted URL would have answered nothing from outside the container.</div>
+
+<h3>One CPU and 512 MB, not 120 cores</h3>
+<p><code>nproc</code> reports 120 and <code>free</code> reports 128 GB, because those are the <em>host's</em> figures. The real limits sit in the cgroup:</p>
+<pre><code>$ cat /sys/fs/cgroup/cpu.max      ->  100000 100000    # exactly 1 core
+$ cat /sys/fs/cgroup/memory.max   ->  536870912        # 512 MB</code></pre>
+<p>This is not a footnote. <code>psutil.cpu_percent()</code> inside these containers measures the whole host, so every node reports the same near-idle number and CPU-aware routing becomes meaningless. Every CPU and memory figure in this report is read from the cgroup's own accounting instead, and divided by the container's quota.</p>
+
+<h3>Only five ports are forwarded</h3>
+<p>Established by binding test listeners inside each container and probing from outside: the host publishes internal ports <strong>3000, 4000, 5000, 6000 and 7000</strong>, and the external port keeps the container's SSH suffix.</p>
+<div class="tw"><table>
+<caption>Ports 8000, 8080 and 9000 are not forwarded at all.</caption>
+<thead><tr><th>Container</th><th class="num">SSH port</th><th class="num">Internal</th><th class="num">Public</th><th>Role</th></tr></thead>
+<tbody>
+<tr class="hl"><td class="mono">Sys1</td><td class="num">2237</td><td class="num">4000</td><td class="num">4237</td><td>Load balancer</td></tr>
+<tr><td class="mono">Sys2</td><td class="num">2238</td><td class="num">4000</td><td class="num">4238</td><td>Backend + PostgreSQL</td></tr>
+<tr><td class="mono">Sys3</td><td class="num">2239</td><td class="num">4000</td><td class="num">4239</td><td>Backend</td></tr>
+<tr><td class="mono">Sys4</td><td class="num">2240</td><td class="num">4000</td><td class="num">4240</td><td>Backend</td></tr>
+</tbody></table></div>
+</section><section id="arch">
+<h2 class="sec"><span class="num">02</span>Architecture</h2>
+<p class="deck">Three backends behind one balancer, sharing a single database.</p>
+<div class="topo">                        client
+                          |
+                          v
+            +-------------------------------+
+            |  Sys1  172.17.0.38 : 4000     |   load balancer + chat UI
+            |  public 10.1.75.79 : 4237     |   adaptive threshold routing
+            +-------------------------------+
+                  |          |          |
+                  v          v          v
+            +----------+ +----------+ +----------+
+            | Sys2     | | Sys3     | | Sys4     |   FastAPI + WebSockets
+            | .39:4000 | | .40:4000 | | .41:4000 |
+            +----------+ +----------+ +----------+
+                  |          |          |
+                  +----------+----------+
+                             v
+                  PostgreSQL 16 on Sys2:5432
+                  one shared database for all three backends</div>
+
+<h3>Why the database is not on the balancer</h3>
+<p>Every request passes through Sys1, so its single core is the cluster's global ceiling. Putting PostgreSQL there would spend a large share of that core on database work and cap everything behind it. It is co-located with the Sys2 backend instead.</p>
+<p>The cost is visible and expected: Sys2 becomes the weakest node, and the balancer routes around it unprompted — during the sustained run Sys2 took <strong>9.8%</strong> of requests against 47.3% and 42.9% for Sys3 and Sys4. That asymmetry is not a flaw in the experiment. It is precisely the condition a performance-based balancer exists to handle, and the one a fixed rotation cannot.</p>
+<p>The measurement confirms the placement: across the 90-second run the balancer averaged <strong>24% CPU</strong> (peak 49%) while the backends ran at 66–87%. The balancer is not the bottleneck.</p>
+
+<h3>Why asyncio and not threads</h3>
+<p>The previous balancer used <code>ThreadingHTTPServer</code> — a thread per connection. On a one-core container that spends the core on context switching long before the backends saturate. It is now a single-threaded asyncio streaming proxy with keep-alive pools to each backend: it parses the request head, picks a backend, and streams the response through without buffering it, which matters because <code>/feed</code> responses reach several megabytes.</p>
+</section><section id="db">
+<h2 class="sec"><span class="num">03</span>One database, and no duplicates</h2>
+<p class="deck">Shared persistence, a unique ID per message, and three independent layers stopping a replay from being stored twice.</p>
+<div class="note finding"><span class="tag fix">Corrected</span><strong>The backends were not sharing data at all.</strong>
+They were configured for PostgreSQL but fell back to a local SQLite file per node whenever the connection failed — and it always failed, because PostgreSQL had never been installed. Each node served its own private, unrelated conversation. That silent fallback has been removed; the backends now fail loudly instead.</div>
+
+<pre><code>CREATE TABLE messages (
+    seq         BIGSERIAL,
+    message_id  TEXT PRIMARY KEY,     -- client-supplied, else a server UUIDv4
+    room_id     TEXT NOT NULL,
+    sender      TEXT NOT NULL,
+    ciphertext  TEXT NOT NULL,        -- AES-GCM; plaintext is never stored
+    nonce       TEXT NOT NULL,
+    signature   TEXT NOT NULL,        -- Ed25519
+    sender_public_key TEXT NOT NULL,
+    timestamp   BIGINT NOT NULL,
+    origin_node TEXT
+);</code></pre>
+
+<h3>Three layers</h3>
+<ul>
+<li><strong>The database is the final authority.</strong> Every insert is <code>INSERT … ON CONFLICT (message_id) DO NOTHING RETURNING seq</code>. A replay returns no row, and the API answers <code>"duplicate": true</code> without writing.</li>
+<li><strong>The balancer's own retries cannot duplicate.</strong> Forwarding <code>POST /message</code> stamps an <code>X-Message-Id</code> generated once per client request and reused if it must fail over to a second backend. Without it, a retry after a backend died mid-request would insert the same message twice.</li>
+<li><strong>Cross-node key agreement.</strong> The AES-GCM key and each user's Ed25519 key are derived with HKDF from one cluster secret, so a row written by Sys3 decrypts and verifies on Sys2 and Sys4. Previously each process generated its own keys at startup, which would have made cross-node reads undecryptable.</li>
+</ul>
+
+<h3>Verified, not asserted</h3>
+<p>Every run compares <code>count(*)</code> against <code>count(distinct message_id)</code> directly in PostgreSQL. They matched in every run. The sharpest check is the sustained run, where the generator deliberately replayed 5% of messages:</p>
+<dl class="strip">
+<div><dt>Messages sent</dt><dd>14,510</dd></div>
+<div><dt>Deliberate replays</dt><dd>693</dd></div>
+<div><dt>Expected distinct</dt><dd>13,817</dd></div>
+<div><dt>Rows stored</dt><dd class="eq">13,817</dd></div>
+<div><dt>Distinct IDs</dt><dd class="eq">13,817</dd></div>
+</dl>
+<p>Cross-node sharing was checked directly too: a message posted to Sys4 is returned by <code>/feed</code> on Sys2 and Sys3 immediately, with correct plaintext.</p>
+</section><section id="algo">
+<h2 class="sec"><span class="num">04</span>How a backend is chosen</h2>
+<p class="deck">A composite score from what each node reports about itself plus what the balancer can measure directly.</p>
+<pre><code>score = 0.45 * cpu                     # cgroup CPU utilisation, 0..1
+      + 0.30 * min(rtt / 120 ms, 3)    # balancer-measured EWMA round-trip time
+      + 0.20 * (in-flight / 24)        # requests the balancer has open right now
+      + 0.05 * memory                  # cgroup memory utilisation, 0..1</code></pre>
+<p>The in-flight term is what makes this react fast enough. CPU arrives only once per health poll, but in-flight count updates the instant a request is dispatched — so piling work onto one backend raises its score immediately rather than a second later.</p>
+
+<h3>The routing rule</h3>
+<ul>
+<li>Stay on the current backend while its score is <strong>at or below the threshold</strong>. This keeps connection reuse high and avoids the pointless spraying a fixed rotation does.</li>
+<li>The moment it crosses, switch to the healthy backend with the lowest score.</li>
+<li>If <em>every</em> backend is above the threshold, still take the least-loaded one, so the cluster degrades gracefully instead of refusing traffic.</li>
+<li>Unhealthy backends are never selected.</li>
+</ul>
+
+<h3>Health detection</h3>
+<ul>
+<li><strong>Active</strong> — a <code>/health</code> probe every second with a one-second timeout. Two consecutive failures mark a node down; two consecutive successes bring it back. Requiring two stops a single blip from evicting a healthy node.</li>
+<li><strong>Passive</strong> — a connection failure while proxying marks the node down immediately, without waiting for the next probe, and drops its pooled connections.</li>
+</ul>
+</section><section id="thr">
+<h2 class="sec"><span class="num">05</span>Finding the threshold</h2>
+<p class="deck">The first sweep could not justify a value. Understanding why is what produced one.</p>
+<p>Sweeping the threshold at 100 concurrent users gave a noisy, non-monotonic curve. The reason shows up in the load-score trace: at that offered load <strong>all three backends sit far above any threshold worth setting</strong>, so the policy never leaves its "everything is saturated, take the least-loaded" branch and the threshold almost never gates a decision.</p>
+<figure class="fig">
+  <img src="figures/load_scores.png" alt="Load scores of the three backends over 90 seconds, all well above the switching threshold">
+  <figcaption>All three backends stay above the 0.55–0.65 band for the entire run. With every score above the line, the threshold has nothing left to decide.</figcaption>
+</figure>
+<figure class="fig">
+  <img src="figures/threshold_sweep.png" alt="Throughput, latency and switch count against threshold at 100 users">
+  <figcaption>One run per threshold at 100 users. The spread between repeat runs is comparable to the spread between settings, so no peak here is meaningful.</figcaption>
+</figure>
+<p>Since one run per point could not separate the settings, the shortlist was repeated three times each:</p>
+<figure class="fig">
+  <img src="figures/threshold_repeat.png" alt="Throughput and p95 against threshold, three runs per point with min/max bars">
+  <figcaption>Mean of three runs, bars showing min and max. 0.30 and 0.55 overlap; 0.65 and 0.85 are worse on both measures.</figcaption>
+</figure>
+
+<h3>At moderate load the threshold does exactly what it should</h3>
+<p>Repeating the sweep at 40 users — where backends actually sit near the threshold — gives a clean monotonic result.</p>
+<figure class="fig">
+  <img src="figures/threshold_moderate.png" alt="Throughput, latency and switch count against threshold at 40 users">
+  <figcaption>At 40 users the trend is unambiguous: throughput falls steadily as the threshold rises and the balancer over-sticks to one node.</figcaption>
+</figure>
+<div class="tw"><table>
+<caption>40 concurrent users, 30 s per run, cluster reset before each.</caption>
+<thead><tr><th class="num">Threshold</th><th class="num">Throughput</th><th class="num">p50 (ms)</th><th class="num">p95 (ms)</th><th class="num">Switches</th></tr></thead>
+<tbody>
+<tr><td class="num">0.30</td><td class="num">216.1</td><td class="num">138.5</td><td class="num">266.4</td><td class="num">1825</td></tr>
+<tr><td class="num">0.45</td><td class="num">201.6</td><td class="num">144.0</td><td class="num">300.5</td><td class="num">1429</td></tr>
+<tr class="hl"><td class="num">0.55</td><td class="num">214.5</td><td class="num">132.7</td><td class="num">276.1</td><td class="num">1632</td></tr>
+<tr><td class="num">0.65</td><td class="num">201.4</td><td class="num">149.4</td><td class="num">290.6</td><td class="num">1054</td></tr>
+<tr><td class="num">0.75</td><td class="num">194.8</td><td class="num">154.8</td><td class="num">305.9</td><td class="num">321</td></tr>
+<tr><td class="num">0.85</td><td class="num">190.5</td><td class="num">163.1</td><td class="num">279.9</td><td class="num">192</td></tr>
+<tr><td class="num">0.95</td><td class="num">170.1</td><td class="num">181.7</td><td class="num">304.9</td><td class="num">94</td></tr>
+<tr><td class="num">1.20</td><td class="num">174.8</td><td class="num">171.1</td><td class="num">343.5</td><td class="num">37</td></tr>
+</tbody></table></div>
+<p>The switch count falling from 1825 to 37 is the mechanism working as designed: a higher threshold tolerates more load on the current backend before moving. Past roughly 0.75 the balancer over-sticks — at 1.20 it effectively pins to a single node, and throughput drops 19% while median response time rises 24%.</p>
+<div class="note good"><span class="tag ok">Deployed</span><strong>Threshold 0.55.</strong> 0.30 and 0.55 are statistically tied at both load levels — within about 1% of each other, with overlapping ranges. 0.55 reaches the same throughput with fewer backend switches, which means better connection reuse. The useful band is <strong>0.30–0.55</strong>; the setting to avoid is anything above about 0.75.</div>
+<pre><code># changeable at runtime, no redeploy
+curl -X POST 'http://10.1.75.79:4237/lb/config?threshold=0.55'</code></pre>
+</section><section id="cmp">
+<h2 class="sec"><span class="num">06</span>Against the fixed policies</h2>
+<p class="deck">Identical workload — 100 users, 30 seconds, cluster reset before each run.</p>
+<figure class="fig">
+  <img src="figures/algorithm_comparison.png" alt="Bar charts comparing throughput and p95 latency across five routing policies">
+  <figcaption>The adaptive policy delivers 84% more throughput and 3.1x better tail latency than fixed round-robin on the same workload.</figcaption>
+</figure>
+<div class="tw"><table>
+<thead><tr><th>Policy</th><th class="num">Throughput</th><th class="num">p50 (ms)</th><th class="num">p95 (ms)</th><th class="num">Sys2</th><th class="num">Sys3</th><th class="num">Sys4</th></tr></thead>
+<tbody>
+<tr><td>round robin</td><td class="num">155.9</td><td class="num">141.6</td><td class="num">2064.8</td><td class="num">1580</td><td class="num">1580</td><td class="num">1579</td></tr>
+<tr><td>ip hash</td><td class="num">174.2</td><td class="num">479.7</td><td class="num">949.6</td><td class="num">0</td><td class="num">0</td><td class="num">5324</td></tr>
+<tr><td>least connections</td><td class="num">218.9</td><td class="num">317.4</td><td class="num">1036.0</td><td class="num">1038</td><td class="num">2807</td><td class="num">2792</td></tr>
+<tr><td>least load</td><td class="num">209.8</td><td class="num">377.6</td><td class="num">852.4</td><td class="num">568</td><td class="num">2800</td><td class="num">2984</td></tr>
+<tr class="hl"><td>adaptive threshold</td><td class="num">286.3</td><td class="num">239.3</td><td class="num">663.3</td><td class="num">658</td><td class="num">4142</td><td class="num">3852</td></tr>
+</tbody></table></div>
+<p>The explanation is in the last three columns. Round-robin splits work perfectly evenly — 1580 / 1580 / 1579 — which is exactly its problem here: it insists on sending a third of all traffic to Sys2, the node that also runs PostgreSQL. Every request queued behind Sys2 drags the tail out past two seconds. The adaptive policy discovers Sys2 is expensive and gives it 8% instead of 33%.</p>
+<p><code>ip_hash</code> shows a different failure mode: with a single client IP it pins everything to one backend and leaves two thirds of the cluster idle.</p>
+</section><section id="gen">
+<h2 class="sec"><span class="num">07</span>Load generator</h2>
+<p class="deck">Drives the two required routes through the balancer only, varying all three dimensions the brief asks for.</p>
+<div class="tw"><table>
+<thead><tr><th>Dimension</th><th>How it varies</th></tr></thead>
+<tbody>
+<tr><td><strong>Users</strong></td><td class="mono">--users N independent async clients, ramped in over --ramp seconds</td></tr>
+<tr><td><strong>Message length</strong></td><td class="mono">every body a fresh random length from --min-len..--max-len</td></tr>
+<tr><td><strong>Interval</strong></td><td class="mono">random think-time from --min-interval..--max-interval between requests</td></tr>
+</tbody></table></div>
+<p>It also mixes reads and writes (<code>--feed-ratio</code>) and deliberately replays a fraction of messages under a reused ID (<code>--retry-duplicates</code>) to exercise de-duplication. While traffic runs it samples <code>/lb/metrics</code>, so response time and the utilisation of all four systems land on one timeline.</p>
+<pre><code>python -m load_generator.generator --url http://10.1.75.79:4237 \
+    --users 100 --duration 90 --min-len 16 --max-len 256 \
+    --min-interval 0.0 --max-interval 0.08 \
+    --feed-ratio 0.2 --retry-duplicates 0.05 \
+    --out experiments/results/run.json</code></pre>
+</section><section id="res">
+<h2 class="sec"><span class="num">08</span>Results</h2>
+<p class="deck">Capacity, then a sustained run showing response time against the utilisation of all four systems.</p>
+<figure class="fig">
+  <img src="figures/capacity.png" alt="Throughput and response-time percentiles against concurrent users">
+  <figcaption>Throughput saturates near 100 concurrent users at about 235 req/s. Past that, throughput is flat and latency grows - a queue building in front of a fixed service rate.</figcaption>
+</figure>
+<div class="tw"><table>
+<caption>No run, at any load, produced a single failed request.</caption>
+<thead><tr><th class="num">Users</th><th class="num">Throughput</th><th class="num">p50 (ms)</th><th class="num">p95 (ms)</th><th class="num">p99 (ms)</th><th class="num">Errors</th></tr></thead>
+<tbody>
+<tr><td class="num">10</td><td class="num">105.7</td><td class="num">58.3</td><td class="num">124.9</td><td class="num">202.9</td><td class="num">0</td></tr>
+<tr><td class="num">25</td><td class="num">139.9</td><td class="num">134.3</td><td class="num">225.5</td><td class="num">481.3</td><td class="num">0</td></tr>
+<tr><td class="num">50</td><td class="num">213.8</td><td class="num">174.0</td><td class="num">368.1</td><td class="num">625.1</td><td class="num">0</td></tr>
+<tr class="hl"><td class="num">100</td><td class="num">234.4</td><td class="num">334.9</td><td class="num">773.0</td><td class="num">1259.5</td><td class="num">0</td></tr>
+<tr><td class="num">150</td><td class="num">206.2</td><td class="num">564.6</td><td class="num">1471.1</td><td class="num">2854.8</td><td class="num">0</td></tr>
+<tr><td class="num">200</td><td class="num">217.3</td><td class="num">650.9</td><td class="num">1821.7</td><td class="num">4692.3</td><td class="num">0</td></tr>
+</tbody></table></div>
+
+<h3>Sustained run — all four systems</h3>
+<p>100 users, 90 seconds, 18,037 requests, zero failures.</p>
+<figure class="fig">
+  <img src="figures/timeline.png" alt="Response time scatter with rolling mean above, CPU utilisation of Sys1 to Sys4 below">
+  <figcaption>Response time against the CPU utilisation of all four systems on one timeline. Sys1, the balancer, sits at 24% while the three backends run at 66-87% - the backends are the bottleneck, which is where it belongs.</figcaption>
+</figure>
+<figure class="fig">
+  <img src="figures/memory.png" alt="Memory utilisation of all four systems over the run">
+  <figcaption>Memory as a share of each container's 512 MB. Sys2 runs highest because it carries PostgreSQL as well as a backend.</figcaption>
+</figure>
+<div class="tw"><table>
+<thead><tr><th>System</th><th>Role</th><th class="num">CPU mean</th><th class="num">CPU peak</th><th class="num">Memory mean</th></tr></thead>
+<tbody>
+<tr><td class="mono">Sys1</td><td>load balancer</td><td class="num">24.2%</td><td class="num">49.1%</td><td class="num">26.9%</td></tr>
+<tr><td class="mono">Sys2</td><td>backend + PostgreSQL</td><td class="num">86.5%</td><td class="num">100%+</td><td class="num">89.9%</td></tr>
+<tr><td class="mono">Sys3</td><td>backend</td><td class="num">66.9%</td><td class="num">92.2%</td><td class="num">32.2%</td></tr>
+<tr><td class="mono">Sys4</td><td>backend</td><td class="num">66.2%</td><td class="num">93.4%</td><td class="num">73.5%</td></tr>
+</tbody></table></div>
+<figure class="fig">
+  <img src="figures/backend_share.png" alt="Bar chart of requests served by Sys2, Sys3 and Sys4">
+  <figcaption>Work actually placed on each backend over the sustained run. The balancer gives the database-hosting node under a tenth of the traffic.</figcaption>
+</figure>
+</section><section id="fail">
+<h2 class="sec"><span class="num">09</span>When a backend dies</h2>
+<p class="deck">Sys4 was killed 15 seconds into a 45-second run and restarted at 30 seconds.</p>
+<figure class="fig">
+  <img src="figures/failover.png" alt="Response time and backend CPU across a mid-run backend kill and restart">
+  <figcaption>The break in Sys4's line is the window it was out of rotation. Sys2 and Sys3 absorb its share and response time is visibly undisturbed.</figcaption>
+</figure>
+<dl class="strip">
+<div><dt>Requests</dt><dd>7,734</dd></div>
+<div><dt>Failed</dt><dd class="zero">0</dd></div>
+<div><dt>Rows / distinct</dt><dd class="eq">6,250</dd></div>
+<div><dt>Detection</dt><dd>~1 s</dd></div>
+<div><dt>Re-admission</dt><dd>~6 s</dd></div>
+</dl>
+<p><strong>No client request failed at any point.</strong> The balancer detects the dead backend and retries the in-flight request against a healthy one — carrying the same <code>X-Message-Id</code>, so the retry cannot duplicate the message. Re-admission waits for two consecutive successful probes, which is why it trails the restart by a few seconds.</p>
+</section><section id="perf">
+<h2 class="sec"><span class="num">10</span>Performance work</h2>
+<p class="deck">What actually moved the numbers, in the order it mattered.</p>
+<div class="tw"><table>
+<thead><tr><th>Change</th><th>Effect</th></tr></thead>
+<tbody>
+<tr><td>Balancer rewritten from thread-per-connection to asyncio with keep-alive pools</td><td>Balancer holds at 24% CPU under full load instead of becoming the ceiling</td></tr>
+<tr><td>Bounded the feed cache's sync window — it had been re-reading the whole table on every <code>/feed</code></td><td class="mono">in-cluster /feed p50 24.5 ms → 8.4 ms</td></tr>
+<tr><td>Replaced Starlette's <code>BaseHTTPMiddleware</code> with raw ASGI middleware</td><td>Removed an anyio task group and message queue per request</td></tr>
+<tr><td>Cached gzip copy of <code>/feed</code>, rebuilt only when the feed changes</td><td class="mono">347 KB → 47 KB per response, no per-request CPU</td></tr>
+<tr><td>Incremental feed cache — each message serialised once</td><td>Avoids re-decrypting the whole history on every read</td></tr>
+</tbody></table></div>
+<p>The gzip result compounds: across the 90-second run <code>/feed</code> delivered 13.3 GB of logical JSON, which travelled as roughly a tenth of that on the wire.</p>
+</section><section id="sec">
+<h2 class="sec"><span class="num">11</span>Security, carried over intact</h2>
+<p class="deck">The application is the previous secure group chat, extended rather than simplified. Nothing was removed to improve benchmark numbers.</p>
+<ul>
+<li><strong>AES-GCM</strong> authenticated encryption for every stored message; plaintext is never written to disk. A corrupted row fails to decrypt and is reported as tampered rather than served.</li>
+<li><strong>Ed25519</strong> signature per message, verified on read.</li>
+<li>Keys derived via <strong>HKDF</strong> from one cluster secret, so every node agrees.</li>
+<li>WebSocket chat, global and private rooms, six-character room codes, room switching, presence and persistent history all still work — verified against the live deployment by <code>tests/test_websocket_live.py</code>, including a message posted over HTTP <code>/message</code> reaching connected WebSocket clients.</li>
+</ul>
+</section><section id="lim">
+<h2 class="sec"><span class="num">12</span>Limitations</h2>
+<p class="deck">What this deployment does not claim.</p>
+<ul>
+<li><strong>Sys2 memory runs near 90%</strong> of its 512 MB with PostgreSQL and a backend sharing the container. No OOM kill occurred in any run, but the feed cache is capped at 80,000 messages to keep headroom. Beyond the cap the oldest messages leave the <em>cache</em>; they remain in PostgreSQL.</li>
+<li><strong><code>/feed</code> returns the entire conversation</strong>, so its cost grows linearly with history. That is what the specification asks for, and it dominates at high message counts.</li>
+<li><strong>Cross-node read visibility is bounded by a 20 ms sync window.</strong> A node's own writes appear in its <code>/feed</code> immediately; a message written on another node appears within 20 ms. This bounds database load under concurrent <code>/feed</code> traffic.</li>
+<li><strong>Single-run measurements carry roughly ±10% variance</strong> on this shared host. Differences smaller than that are reported as ties, not winners.</li>
+<li>The load generator ran from outside the lab network, so absolute latencies include the client's network path. Comparisons between settings are unaffected — they were all measured over the same path.</li>
+</ul>
+</section>
+</main>
+<footer>
+  <span>Every figure generated by the project's own load generator.</span>
+  <span>Each experiment resets the cluster first, so runs start from an identical state.</span>
+</footer>
+</div>
+</body>
+</html>

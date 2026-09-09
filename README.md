@@ -15,7 +15,7 @@ Clients only ever talk to the load balancer.
 | Read all messages | `GET  http://10.1.75.79:4237/feed` |
 | Chat UI | http://10.1.75.79:4237/ |
 | Repository | https://github.com/Abhigyan6091/Local-Web-Chat |
-| Report | [`REPORT.md`](REPORT.md) |
+| Report | [`REPORT.md`](REPORT.md) · [`report/report.html`](report/report.html) (open in a browser, print to PDF) |
 
 Reachable from the IIT Bhilai network.
 
