@@ -1,10 +1,21 @@
 """
-main.py — FastAPI WebSocket + HTTP backend with Persistence & Auto-Registration
-==============================================================================
-WebSocket : ws://<host>:<port>/ws
-Health    : GET  http://<host>:<port>/health
-Message   : POST http://<host>:<port>/message   {"client-name": "...", "msg": "...", "message_id": "..." (optional)}
-Feed      : GET  http://<host>:<port>/feed
+main.py — Distributed secure group-chat backend node (Sys2 / Sys3 / Sys4)
+=========================================================================
+This is the same secure, persistent group-chat application as before — global
+and private rooms, presence, room codes, AES-GCM encryption at rest, Ed25519
+signatures and tamper detection — extended so that three independent nodes
+serve one shared conversation behind a load balancer.
+
+Endpoints
+---------
+POST /message   {"client-name": ..., "msg": ...}   required assignment route
+GET  /feed                                          required assignment route
+GET  /health                                        liveness + load report used by the LB
+GET  /stats                                         detailed node diagnostics
+WS   /ws                                            full chat protocol (unchanged)
+
+Every node reads and writes the same PostgreSQL database, so `/feed` returns
+the same conversation no matter which node the load balancer picked.
 """
 
 from __future__ import annotations
@@ -14,54 +25,50 @@ import sys
 import json
 import time
 import uuid
-import logging
 import asyncio
-import threading
-import urllib.request
-import urllib.error
+import logging
 from pathlib import Path
 from typing import Dict, Set, Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-
-logging.getLogger("asyncio").setLevel(logging.CRITICAL)
 
 server_dir = Path(__file__).parent
-if str(server_dir) not in sys.path:
-    sys.path.insert(0, str(server_dir))
+for extra in (str(server_dir), str(server_dir.parent)):
+    if extra not in sys.path:
+        sys.path.insert(0, extra)
 
 try:
-    import database as db
+    import db_async as db
 except ImportError:
-    from server import database as db
+    from server import db_async as db
 
-# ── Logging ──────────────────────────────────────────────────────────────────
+try:
+    from common import sysmetrics
+except ImportError:
+    sys.path.insert(0, str(server_dir.parent / "common"))
+    import sysmetrics
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
-log = logging.getLogger(__name__)
+logging.getLogger("asyncio").setLevel(logging.CRITICAL)
+log = logging.getLogger("backend")
 
-# Node configuration from environment
-NODE_ID = os.environ.get("NODE_ID", "Sys2")
-MY_HOST = os.environ.get("MY_HOST", "127.0.0.1")
-MY_PORT = int(os.environ.get("PORT", os.environ.get("BACKEND_PORT", 8000)))
-LB_HOST = os.environ.get("LB_HOST", "127.0.0.1")
-LB_PORT = int(os.environ.get("LB_PORT", 8000))
-AUTO_REGISTER = os.environ.get("AUTO_REGISTER", "1") == "1"
+NODE_ID = os.environ.get("NODE_ID", "Sys?")
+MY_PORT = int(os.environ.get("PORT", "4000"))
+HTTP_ROOM_ID = "global"
 
-# ── Initialize Database ──────────────────────────────────────────────────────
-try:
-    db.init_db()
-except Exception as e:
-    log.warning(f"Database init warning: {e}")
+# Feed cache ceiling. Keeps a node inside its 512 MB container even if the load
+# generator posts for a very long time; oldest messages are dropped from the
+# in-memory cache first (they remain in PostgreSQL).
+FEED_MAX_ITEMS = int(os.environ.get("FEED_MAX_ITEMS", "150000"))
 
-# ── App ───────────────────────────────────────────────────────────────────────
-app = FastAPI(title="Distributed Group Chat Server", version="3.1.0")
+JSON_HEADERS = {"Access-Control-Allow-Origin": "*"}
 
+app = FastAPI(title="Distributed Secure Group Chat — Backend Node", version="4.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -69,67 +76,51 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-HTTP_ROOM_ID = "global"
+
+# ── Live load accounting ─────────────────────────────────────────────────────
+class NodeLoad:
+    """Per-node counters the load balancer consumes through /health."""
+
+    def __init__(self) -> None:
+        self.inflight = 0
+        self.total_requests = 0
+        self.total_messages = 0
+        self.duplicates = 0
+        self.errors = 0
+        self.ewma_latency_ms = 0.0
+        self.started = time.time()
+
+    def observe(self, latency_ms: float) -> None:
+        # EWMA with alpha=0.1 — smooth enough not to flap, fast enough to react.
+        self.ewma_latency_ms = (
+            latency_ms if self.ewma_latency_ms == 0.0
+            else 0.9 * self.ewma_latency_ms + 0.1 * latency_ms
+        )
 
 
-# ── Auto-Registration & Heartbeat Thread ─────────────────────────────────────
-def _register_with_load_balancer():
-    """Announces this backend to the Load Balancer so it is dynamically discovered."""
-    if not AUTO_REGISTER:
-        return
-
-    register_url = f"http://{LB_HOST}:{LB_PORT}/register"
-    payload = json.dumps({
-        "id": NODE_ID,
-        "host": MY_HOST,
-        "port": MY_PORT,
-        "weight": 1
-    }).encode("utf-8")
-
-    def _loop():
-        # Small delay to let LB / network come up
-        time.sleep(1.0)
-        while True:
-            try:
-                req = urllib.request.Request(
-                    register_url,
-                    data=payload,
-                    headers={"Content-Type": "application/json"},
-                    method="POST"
-                )
-                with urllib.request.urlopen(req, timeout=3.0) as resp:
-                    if resp.status == 200:
-                        log.info(f"Registered with Load Balancer at {register_url} as {NODE_ID}")
-            except Exception:
-                pass
-            time.sleep(10.0)
-
-    t = threading.Thread(target=_loop, name="LB-AutoRegister", daemon=True)
-    t.start()
+load = NodeLoad()
 
 
-@app.on_event("startup")
-async def startup_event():
-    _register_with_load_balancer()
+@app.middleware("http")
+async def track_load(request: Request, call_next):
+    load.inflight += 1
+    load.total_requests += 1
+    t0 = time.perf_counter()
+    try:
+        return await call_next(request)
+    finally:
+        load.inflight -= 1
+        load.observe((time.perf_counter() - t0) * 1000.0)
 
 
-# ── Request/response models for the required HTTP routes ────────────────────
-class MessageIn(BaseModel):
-    client_name: str = Field(..., alias="client-name")
-    msg: str
-    message_id: Optional[str] = None
-
-    class Config:
-        populate_by_name = True
-
-
-# ── Connection Manager ────────────────────────────────────────────────────────
+# ── WebSocket room manager (unchanged chat semantics) ────────────────────────
 class RoomConnectionManager:
-    """Manages WebSocket connections partitioned by room_id."""
-
     def __init__(self) -> None:
         self._clients: Dict[WebSocket, dict] = {}
         self._room_members: Dict[str, Set[WebSocket]] = {}
+
+    def client_count(self) -> int:
+        return len(self._clients)
 
     async def _send(self, ws: WebSocket, payload: dict) -> None:
         try:
@@ -137,16 +128,24 @@ class RoomConnectionManager:
         except Exception:
             pass
 
-    async def broadcast_to_room(self, room_id: str, payload: dict, exclude: WebSocket | None = None) -> None:
-        members = list(self._room_members.get(room_id, set()))
-        for ws in members:
+    async def broadcast_to_room(self, room_id: str, payload: dict,
+                                exclude: WebSocket | None = None) -> None:
+        for ws in list(self._room_members.get(room_id, ())):
             if ws is not exclude:
                 await self._send(ws, payload)
 
+    async def broadcast_raw(self, room_id: str, raw: str,
+                            exclude: WebSocket | None = None) -> None:
+        for ws in list(self._room_members.get(room_id, ())):
+            if ws is not exclude:
+                try:
+                    await ws.send_text(raw)
+                except Exception:
+                    pass
+
     def get_room_users(self, room_id: str) -> list[str]:
-        members = self._room_members.get(room_id, set())
         users = []
-        for ws in members:
+        for ws in self._room_members.get(room_id, ()):
             info = self._clients.get(ws)
             if info and info.get("username"):
                 users.append(info["username"])
@@ -154,11 +153,7 @@ class RoomConnectionManager:
 
     async def register_user(self, ws: WebSocket, username: str) -> str:
         client_id = str(uuid.uuid4())[:8]
-        self._clients[ws] = {
-            "id": client_id,
-            "username": username,
-            "room_id": "global"
-        }
+        self._clients[ws] = {"id": client_id, "username": username, "room_id": None}
         await self.switch_room(ws, "global")
         return client_id
 
@@ -169,8 +164,7 @@ class RoomConnectionManager:
 
         current_room_id = client.get("room_id")
         username = client["username"]
-        room_info = db.get_room_by_id(target_room_id)
-
+        room_info = await db.get_room_by_id(target_room_id)
         if not room_info:
             await self._send(ws, {"type": "error", "message": "Room not found"})
             return False
@@ -180,166 +174,292 @@ class RoomConnectionManager:
             if not self._room_members[current_room_id]:
                 del self._room_members[current_room_id]
             await self.broadcast_to_room(current_room_id, {
-                "type": "user_left",
-                "roomId": current_room_id,
-                "username": username
-            })
+                "type": "user_left", "roomId": current_room_id, "username": username})
 
         client["room_id"] = target_room_id
-        if target_room_id not in self._room_members:
-            self._room_members[target_room_id] = set()
-        self._room_members[target_room_id].add(ws)
+        self._room_members.setdefault(target_room_id, set()).add(ws)
+        log.info("User %s switched to room %s (%s)", username, room_info["name"], target_room_id)
 
-        log.info("User %s switched to room: %s (%s)", username, room_info["name"], target_room_id)
-
-        history = db.get_room_messages(target_room_id)
+        history = await db.get_room_messages(target_room_id)
         room_users = self.get_room_users(target_room_id)
-
         await self._send(ws, {
             "type": "room_entered",
             "room": room_info,
             "history": history,
-            "users": [u for u in room_users if u != username]
+            "users": [u for u in room_users if u != username],
+            "node_id": NODE_ID,
         })
-
         await self.broadcast_to_room(target_room_id, {
-            "type": "user_joined",
-            "roomId": target_room_id,
-            "username": username
-        }, exclude=ws)
-
+            "type": "user_joined", "roomId": target_room_id, "username": username},
+            exclude=ws)
         return True
 
     async def disconnect(self, ws: WebSocket) -> None:
         client = self._clients.pop(ws, None)
         if not client:
             return
-
         room_id = client.get("room_id")
         username = client.get("username")
-
         if room_id and room_id in self._room_members:
             self._room_members[room_id].discard(ws)
             if not self._room_members[room_id]:
                 del self._room_members[room_id]
-
             if username:
                 log.info("User left: %s from room %s", username, room_id)
                 await self.broadcast_to_room(room_id, {
-                    "type": "user_left",
-                    "roomId": room_id,
-                    "username": username
-                })
+                    "type": "user_left", "roomId": room_id, "username": username})
 
-    async def handle_message(self, ws: WebSocket, text: str) -> None:
+    async def handle_message(self, ws: WebSocket, text: str,
+                             message_id: Optional[str] = None) -> None:
         client = self._clients.get(ws)
         if not client:
             return
-
         room_id = client["room_id"]
-        username = client["username"]
-        sender_id = client["id"]
-        now = int(time.time() * 1000)
-
-        msg_record = db.save_message(room_id, username, sender_id, text, now)
-
-        payload = {
+        record = await db.save_message(
+            room_id=room_id, sender=client["username"], sender_id=client["id"],
+            text=text, timestamp=int(time.time() * 1000), message_id=message_id)
+        if record["duplicate"]:
+            return
+        await db.feed_cache.add_local(record)
+        await self.broadcast_to_room(room_id, {
             "type": "message",
+            "id": record["id"],
             "roomId": room_id,
-            "sender": username,
-            "senderId": sender_id,
-            "text": msg_record["text"],
-            "timestamp": now,
-            "verified": msg_record["verified"],
-            "tampered": msg_record["tampered"],
-        }
-        await self.broadcast_to_room(room_id, payload)
-
-    async def broadcast_http_message(self, room_id: str, payload: dict) -> None:
-        await self.broadcast_to_room(room_id, payload)
+            "sender": record["sender"],
+            "senderId": record["senderId"],
+            "text": record["text"],
+            "timestamp": record["timestamp"],
+            "verified": True,
+            "tampered": False,
+        })
 
 
 manager = RoomConnectionManager()
 
 
-# ── HTTP Routes (required by assignment spec) ────────────────────────────────
+# ── Cross-node fan-out ───────────────────────────────────────────────────────
+# A message posted through Sys3 must reach WebSocket users attached to Sys2 and
+# Sys4. Rather than paying for a NOTIFY on every insert, this pump runs only
+# while this node actually has WebSocket clients: it reuses the feed cache's
+# incremental sync and forwards anything new to local sockets. During a pure
+# HTTP load test (no WS clients) it costs nothing at all.
+class FanoutPump:
+    def __init__(self, interval: float = 0.25) -> None:
+        self.interval = interval
+        self._task: Optional[asyncio.Task] = None
+        self._cursor = 0
 
+    def ensure_running(self) -> None:
+        if self._task is None or self._task.done():
+            self._cursor = db.feed_cache.item_count()
+            self._task = asyncio.create_task(self._run())
+
+    async def _run(self) -> None:
+        try:
+            while manager.client_count() > 0:
+                await asyncio.sleep(self.interval)
+                try:
+                    self._cursor, new_items = await db.feed_cache.items_since(self._cursor)
+                except Exception as exc:
+                    log.warning("fanout sync failed: %s", exc)
+                    continue
+                for blob in new_items:
+                    try:
+                        payload = json.loads(blob)
+                    except Exception:
+                        continue
+                    room_id = payload.get("roomId")
+                    if room_id in manager._room_members:
+                        await manager.broadcast_raw(room_id, json.dumps({
+                            "type": "message",
+                            "id": payload.get("id"),
+                            "roomId": room_id,
+                            "sender": payload.get("sender"),
+                            "senderId": payload.get("senderId"),
+                            "text": payload.get("text"),
+                            "timestamp": payload.get("timestamp"),
+                            "verified": payload.get("verified", True),
+                            "tampered": payload.get("tampered", False),
+                            "remote": True,
+                        }))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("fanout pump stopped: %s", exc)
+
+
+fanout = FanoutPump()
+
+
+# ── Lifecycle ────────────────────────────────────────────────────────────────
+@app.on_event("startup")
+async def on_startup() -> None:
+    await db.init_pool()
+    db.feed_cache.max_items = FEED_MAX_ITEMS
+    await db.feed_cache.sync(force=True)
+    sysmetrics.snapshot()  # prime the CPU sampler
+    log.info("Backend %s ready on port %s (feed cached: %d messages)",
+             NODE_ID, MY_PORT, db.feed_cache.item_count())
+
+
+@app.on_event("shutdown")
+async def on_shutdown() -> None:
+    await db.close_pool()
+
+
+# ── Required assignment routes ───────────────────────────────────────────────
 @app.get("/health")
-async def health() -> dict:
-    return {
+async def health() -> Response:
+    """Liveness plus the load signals the balancer scores backends on."""
+    m = sysmetrics.snapshot()
+    body = json.dumps({
         "status": "ok",
         "service": "Backend",
         "node_id": NODE_ID,
-        "total_clients": len(manager._clients)
-    }
+        "cpu": m["cpu"],
+        "mem": m["mem"],
+        "load1": m["load1"],
+        "cpu_cores": m["cpu_cores"],
+        "inflight": load.inflight,
+        "ewma_latency_ms": round(load.ewma_latency_ms, 3),
+        "total_requests": load.total_requests,
+        "total_messages": load.total_messages,
+        "duplicates": load.duplicates,
+        "ws_clients": manager.client_count(),
+        "uptime_s": round(time.time() - load.started, 1),
+    }, separators=(",", ":"))
+    return Response(content=body, media_type="application/json", headers=JSON_HEADERS)
+
+
+async def _extract_message(request: Request) -> tuple[str, str, Optional[str]]:
+    """Accepts JSON, form-encoded or query-string input, in that order."""
+    client_name = text = message_id = None
+    ctype = request.headers.get("content-type", "")
+    raw = await request.body()
+
+    if raw:
+        if "application/json" in ctype or raw[:1] in (b"{", b"["):
+            try:
+                body = json.loads(raw)
+                if isinstance(body, dict):
+                    client_name = body.get("client-name") or body.get("client_name") or body.get("clientName")
+                    text = body.get("msg") or body.get("message") or body.get("text")
+                    message_id = (body.get("message_id") or body.get("messageId")
+                                  or body.get("id") or body.get("msg_id"))
+            except Exception:
+                pass
+        if client_name is None and text is None:
+            try:
+                form = await request.form()
+                client_name = form.get("client-name") or form.get("client_name")
+                text = form.get("msg") or form.get("message")
+                message_id = form.get("message_id") or form.get("messageId")
+            except Exception:
+                pass
+
+    qp = request.query_params
+    client_name = client_name or qp.get("client-name") or qp.get("client_name")
+    text = text if text is not None else (qp.get("msg") or qp.get("message"))
+    message_id = message_id or qp.get("message_id")
+
+    # The balancer stamps a stable id so that a request it retries against a
+    # second backend cannot be stored twice.
+    message_id = message_id or request.headers.get("X-Message-Id")
+
+    return (str(client_name).strip()[:64] if client_name else "Anonymous",
+            str(text) if text is not None else "",
+            str(message_id) if message_id else None)
 
 
 @app.post("/message")
-async def post_message(request: Request) -> dict:
-    """
-    Accepts {"client-name": ..., "msg": ...} (message_id optional).
-    Also supports form-urlencoded / raw JSON payloads.
-    Persists with UUID deduplication and broadcasts to global room.
-    """
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
+async def post_message(request: Request) -> Response:
+    client_name, text, message_id = await _extract_message(request)
+    if not text.strip():
+        load.errors += 1
+        return Response(
+            content=json.dumps({"status": "error", "message": "msg cannot be empty",
+                                "node_id": NODE_ID}),
+            status_code=400, media_type="application/json", headers=JSON_HEADERS)
 
-    client_name = str(body.get("client-name") or body.get("client_name") or "Anonymous").strip()[:50]
-    text = str(body.get("msg") or body.get("message") or body.get("text") or "").strip()
-    message_id = body.get("message_id") or body.get("messageId")
-    now = int(time.time() * 1000)
-
-    if not text:
-        return {"status": "error", "message": "msg cannot be empty"}
-
-    sender_id = f"http-{client_name}"
-
-    msg_record = db.save_message(
+    record = await db.save_message(
         room_id=HTTP_ROOM_ID,
         sender=client_name,
-        sender_id=sender_id,
+        sender_id=f"http-{client_name}",
         text=text,
-        timestamp=now,
-        message_id=str(message_id) if message_id else None,
+        timestamp=int(time.time() * 1000),
+        message_id=message_id,
     )
 
-    if not msg_record.get("duplicate"):
-        await manager.broadcast_http_message(HTTP_ROOM_ID, {
-            "type": "message",
-            "roomId": HTTP_ROOM_ID,
-            "sender": client_name,
-            "senderId": sender_id,
-            "text": msg_record["text"],
-            "timestamp": msg_record["timestamp"],
-            "verified": msg_record["verified"],
-            "tampered": msg_record["tampered"],
-        })
+    if record["duplicate"]:
+        load.duplicates += 1
+    else:
+        load.total_messages += 1
+        await db.feed_cache.add_local(record)
+        if manager.client_count():
+            await manager.broadcast_to_room(HTTP_ROOM_ID, {
+                "type": "message",
+                "id": record["id"],
+                "roomId": HTTP_ROOM_ID,
+                "sender": client_name,
+                "senderId": record["senderId"],
+                "text": record["text"],
+                "timestamp": record["timestamp"],
+                "verified": True,
+                "tampered": False,
+            })
 
-    return {
+    body = json.dumps({
         "status": "ok",
-        "message_id": msg_record["id"],
-        "duplicate": msg_record.get("duplicate", False),
-        "timestamp": msg_record["timestamp"],
-        "node_id": NODE_ID
-    }
+        "message_id": record["id"],
+        "duplicate": record["duplicate"],
+        "timestamp": record["timestamp"],
+        "node_id": NODE_ID,
+    }, separators=(",", ":"))
+    return Response(content=body, media_type="application/json", headers=JSON_HEADERS)
 
 
 @app.get("/feed")
-async def get_feed(limit: int = 500) -> dict:
-    """Returns all messages across the shared chat."""
-    messages = db.get_all_messages(limit=limit)
-    return {"status": "ok", "count": len(messages), "messages": messages, "node_id": NODE_ID}
+async def get_feed(request: Request, limit: int = 0) -> Response:
+    """Every message in the shared conversation, oldest first."""
+    if limit and limit > 0:
+        body = await db.feed_cache.response_limited(NODE_ID, limit)
+        return Response(content=body, media_type="application/json", headers=JSON_HEADERS)
+
+    gzip_ok = "gzip" in request.headers.get("accept-encoding", "")
+    body = await db.feed_cache.response_bytes(NODE_ID, gzipped=gzip_ok)
+    headers = dict(JSON_HEADERS)
+    if gzip_ok:
+        headers["Content-Encoding"] = "gzip"
+        headers["Vary"] = "Accept-Encoding"
+    return Response(content=body, media_type="application/json", headers=headers)
 
 
-# ── WebSocket ─────────────────────────────────────────────────────────────────
+@app.get("/stats")
+async def stats() -> Response:
+    m = sysmetrics.snapshot()
+    body = json.dumps({
+        "node_id": NODE_ID,
+        "system": m,
+        "load": {
+            "inflight": load.inflight,
+            "total_requests": load.total_requests,
+            "total_messages": load.total_messages,
+            "duplicates": load.duplicates,
+            "errors": load.errors,
+            "ewma_latency_ms": round(load.ewma_latency_ms, 3),
+        },
+        "feed_cache": db.feed_cache.stats(),
+        "ws_clients": manager.client_count(),
+        "db_rows": await db.count_messages(),
+    }, indent=2)
+    return Response(content=body, media_type="application/json", headers=JSON_HEADERS)
 
+
+# ── WebSocket chat (full original protocol) ──────────────────────────────────
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket) -> None:
     await ws.accept()
-    username: str | None = None
-
+    username: Optional[str] = None
     try:
         while True:
             raw = await ws.receive_text()
@@ -347,18 +467,18 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
                 continue
-
             msg_type = msg.get("type")
 
             if msg_type == "join":
                 username = str(msg.get("username", "Anonymous")).strip()[:20]
                 await manager.register_user(ws, username)
+                fanout.ensure_running()
 
             elif msg_type == "create_room":
                 if not username:
                     continue
                 room_name = str(msg.get("name", "Private Room")).strip()[:30] or "Private Room"
-                new_room = db.create_room(room_name, is_private=True)
+                new_room = await db.create_room(room_name, is_private=True)
                 log.info("Room created: %s (code=%s)", new_room["name"], new_room["code"])
                 await ws.send_text(json.dumps({"type": "room_created", "room": new_room}))
                 await manager.switch_room(ws, new_room["id"])
@@ -368,33 +488,34 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                     continue
                 target_code = str(msg.get("code", "")).strip().upper()
                 target_id = str(msg.get("roomId", "")).strip()
-
                 room = None
                 if target_code:
-                    room = db.get_room_by_code(target_code)
+                    room = await db.get_room_by_code(target_code)
                 elif target_id:
-                    room = db.get_room_by_id(target_id)
-
+                    room = await db.get_room_by_id(target_id)
                 if room:
                     await manager.switch_room(ws, room["id"])
                 else:
                     await ws.send_text(json.dumps({
                         "type": "error",
-                        "message": f"Room code '{target_code}' not found." if target_code else "Room not found."
+                        "message": (f"Room code '{target_code}' not found."
+                                    if target_code else "Room not found."),
                     }))
 
             elif msg_type == "switch_room":
                 if not username:
                     continue
-                target_id = str(msg.get("roomId", "global")).strip()
-                await manager.switch_room(ws, target_id)
+                await manager.switch_room(ws, str(msg.get("roomId", "global")).strip())
 
             elif msg_type == "message":
                 if not username:
                     continue
                 text = str(msg.get("text", "")).strip()
                 if text:
-                    await manager.handle_message(ws, text)
+                    await manager.handle_message(ws, text, msg.get("message_id"))
 
     except WebSocketDisconnect:
+        await manager.disconnect(ws)
+    except Exception as exc:
+        log.warning("websocket error: %s", exc)
         await manager.disconnect(ws)

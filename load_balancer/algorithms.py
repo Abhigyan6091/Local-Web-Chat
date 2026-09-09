@@ -1,7 +1,21 @@
-import threading
-import hashlib
+"""
+algorithms.py — backend bookkeeping and selection policies
+==========================================================
+`BackendNode` holds everything known about one backend: whether it is healthy,
+what it last reported about its own utilisation, and what the balancer itself
+has measured while proxying to it.
+
+The policy the assignment asks for is `AdaptiveThreshold`. The classic
+strategies below it (round robin, least connections, IP hash, weighted) are kept
+so the report can compare against them on identical workloads.
+"""
+
+from __future__ import annotations
+
 import time
-from typing import List, Optional, Dict, Any
+import hashlib
+import threading
+from typing import Any, Dict, List, Optional
 
 
 class BackendNode:
@@ -12,246 +26,349 @@ class BackendNode:
         self.weight = max(1, int(weight))
         self.url = f"http://{self.host}:{self.port}"
 
+        # ---- health ----
         self.is_healthy = True
-        self.active_connections = 0
+        self.consecutive_failures = 0
+        self.consecutive_successes = 0
+        self.last_health_check_time = 0.0
+        self.last_state_change = time.time()
+
+        # ---- self-reported by the backend's /health ----
+        self.cpu = 0.0                 # 0..1 of the container's CPU allowance
+        self.mem = 0.0                 # 0..1 of the container's memory limit
+        self.backend_inflight = 0
+        self.backend_latency_ms = 0.0
+        self.ws_clients = 0
+
+        # ---- measured by the balancer ----
+        self.active_connections = 0    # in-flight right now, updates instantly
         self.total_requests = 0
         self.failed_requests = 0
-        self.last_health_check_time = time.time()
+        self.ewma_rtt_ms = 0.0
         self.last_latency_ms = 0.0
-
-        # Smoothed (EMA) latency from real client requests.
-        self._ema_alpha = 0.3
-        self.avg_latency_ms = 0.0
-        self._has_sample = False
+        self.health_rtt_ms = 0.0
 
         self._lock = threading.Lock()
 
-    def mark_healthy(self, latency_ms: Optional[float] = None):
-        """Mark node healthy from health checker without corrupting request EMA."""
+    # ---- health transitions ------------------------------------------------
+    def report_health_ok(self, metrics: Dict[str, Any], rtt_ms: float,
+                         rise_threshold: int = 2) -> bool:
+        """Returns True when this probe flipped the node back to healthy."""
         with self._lock:
-            self.is_healthy = True
             self.last_health_check_time = time.time()
-            if latency_ms is not None and latency_ms > 0:
-                self.last_latency_ms = latency_ms
+            self.health_rtt_ms = rtt_ms
+            self.cpu = float(metrics.get("cpu", 0.0) or 0.0)
+            self.mem = float(metrics.get("mem", 0.0) or 0.0)
+            self.backend_inflight = int(metrics.get("inflight", 0) or 0)
+            self.backend_latency_ms = float(metrics.get("ewma_latency_ms", 0.0) or 0.0)
+            self.ws_clients = int(metrics.get("ws_clients", 0) or 0)
+            self.consecutive_failures = 0
+            self.consecutive_successes += 1
+            if not self.is_healthy and self.consecutive_successes >= rise_threshold:
+                self.is_healthy = True
+                self.last_state_change = time.time()
+                return True
+            return False
 
-    def record_request_latency(self, latency_ms: float):
-        """Record actual client proxy request latency and update exponential moving average."""
+    def report_health_fail(self, fail_threshold: int = 2) -> bool:
+        """Returns True when this probe flipped the node to unhealthy."""
         with self._lock:
-            self.is_healthy = True
-            self.last_latency_ms = latency_ms
-            if latency_ms > 0:
-                if not self._has_sample:
-                    self.avg_latency_ms = latency_ms
-                    self._has_sample = True
-                else:
-                    self.avg_latency_ms = (
-                        self._ema_alpha * latency_ms
-                        + (1.0 - self._ema_alpha) * self.avg_latency_ms
-                    )
-
-    def mark_unhealthy(self):
-        with self._lock:
-            self.is_healthy = False
             self.last_health_check_time = time.time()
+            self.consecutive_successes = 0
+            self.consecutive_failures += 1
+            if self.is_healthy and self.consecutive_failures >= fail_threshold:
+                self.is_healthy = False
+                self.last_state_change = time.time()
+                return True
+            return False
 
-    def increment_connections(self):
+    def mark_unhealthy(self) -> None:
+        """Passive failure detection: a proxied request could not be delivered."""
+        with self._lock:
+            self.consecutive_successes = 0
+            self.consecutive_failures += 1
+            if self.is_healthy:
+                self.is_healthy = False
+                self.last_state_change = time.time()
+
+    # ---- request accounting ------------------------------------------------
+    def begin_request(self) -> None:
         with self._lock:
             self.active_connections += 1
             self.total_requests += 1
 
-    def decrement_connections(self, success: bool = True):
+    def end_request(self, latency_ms: float, success: bool = True) -> None:
         with self._lock:
             if self.active_connections > 0:
                 self.active_connections -= 1
-            if not success:
+            if success:
+                self.last_latency_ms = latency_ms
+                self.ewma_rtt_ms = (latency_ms if self.ewma_rtt_ms == 0.0
+                                    else 0.8 * self.ewma_rtt_ms + 0.2 * latency_ms)
+            else:
                 self.failed_requests += 1
 
-    def load_score(self) -> float:
-        """Combined load signal used to rank backends: smoothed latency
-        weighted together with current in-flight connections. Lower = less loaded."""
-        with self._lock:
-            return self.avg_latency_ms + (self.active_connections * 25.0)
+    # ---- composite load score ---------------------------------------------
+    def load_score(self, cfg: "ScoreConfig") -> float:
+        """
+        Normalised load in roughly 0..1+, where 1.0 means "at capacity".
 
-    def exceeds_threshold(self, latency_threshold_ms: float, connections_threshold: int) -> bool:
-        with self._lock:
-            return (
-                (self.avg_latency_ms > latency_threshold_ms and self.total_requests > 3)
-                or self.active_connections >= connections_threshold
-            )
+        Blends what the node reports about itself (CPU, memory, its own queue)
+        with what the balancer can see immediately (in-flight requests and
+        round-trip time). The in-flight term is what makes the score react
+        within a single request instead of waiting for the next health poll.
+        """
+        conn_term = self.active_connections / max(1.0, cfg.conn_capacity)
+        lat_term = (self.ewma_rtt_ms / cfg.target_latency_ms) if cfg.target_latency_ms > 0 else 0.0
+        return (cfg.w_cpu * self.cpu
+                + cfg.w_conn * conn_term
+                + cfg.w_lat * min(lat_term, 3.0)
+                + cfg.w_mem * self.mem)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self, cfg: Optional["ScoreConfig"] = None) -> Dict[str, Any]:
         with self._lock:
-            return {
+            data = {
                 "id": self.node_id,
                 "host": self.host,
                 "port": self.port,
                 "url": self.url,
                 "weight": self.weight,
                 "healthy": self.is_healthy,
+                "cpu": round(self.cpu, 4),
+                "mem": round(self.mem, 4),
                 "active_connections": self.active_connections,
+                "backend_inflight": self.backend_inflight,
+                "ws_clients": self.ws_clients,
                 "total_requests": self.total_requests,
                 "failed_requests": self.failed_requests,
+                "ewma_rtt_ms": round(self.ewma_rtt_ms, 2),
                 "last_latency_ms": round(self.last_latency_ms, 2),
-                "avg_latency_ms": round(self.avg_latency_ms, 2),
-                "last_seen_seconds_ago": round(time.time() - self.last_health_check_time, 1),
+                "backend_latency_ms": round(self.backend_latency_ms, 2),
+                "health_rtt_ms": round(self.health_rtt_ms, 2),
+                "last_seen_seconds_ago": (round(time.time() - self.last_health_check_time, 2)
+                                          if self.last_health_check_time else None),
             }
+        if cfg is not None:
+            data["load_score"] = round(self.load_score(cfg), 4)
+        return data
+
+
+class ScoreConfig:
+    """Weights and normalisers for `BackendNode.load_score`."""
+
+    def __init__(self, w_cpu: float = 0.45, w_conn: float = 0.20,
+                 w_lat: float = 0.30, w_mem: float = 0.05,
+                 target_latency_ms: float = 120.0, conn_capacity: float = 24.0):
+        total = w_cpu + w_conn + w_lat + w_mem
+        self.w_cpu, self.w_conn = w_cpu / total, w_conn / total
+        self.w_lat, self.w_mem = w_lat / total, w_mem / total
+        self.target_latency_ms = target_latency_ms
+        self.conn_capacity = conn_capacity
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"w_cpu": round(self.w_cpu, 3), "w_conn": round(self.w_conn, 3),
+                "w_lat": round(self.w_lat, 3), "w_mem": round(self.w_mem, 3),
+                "target_latency_ms": self.target_latency_ms,
+                "conn_capacity": self.conn_capacity}
 
 
 class LoadBalancerAlgorithm:
-    def __init__(self, nodes: Optional[List[BackendNode]] = None, **kwargs):
-        self.nodes: List[BackendNode] = list(nodes) if nodes else []
+    name = "base"
+
+    def __init__(self, nodes: Optional[List[BackendNode]] = None,
+                 cfg: Optional[ScoreConfig] = None, **kwargs):
+        self.nodes: List[BackendNode] = list(nodes or [])
+        self.cfg = cfg or ScoreConfig()
         self._lock = threading.Lock()
 
-    def set_nodes(self, nodes: List[BackendNode]):
+    def set_nodes(self, nodes: List[BackendNode]) -> None:
         with self._lock:
             self.nodes = list(nodes)
 
-    def add_or_update_node(self, node: BackendNode):
-        with self._lock:
-            for i, n in enumerate(self.nodes):
-                if n.node_id == node.node_id or (n.host == node.host and n.port == node.port):
-                    self.nodes[i] = node
-                    return
-            self.nodes.append(node)
-
-    def remove_node(self, node_id: str):
-        with self._lock:
-            self.nodes = [n for n in self.nodes if n.node_id != node_id]
-
-    def get_healthy_nodes(self) -> List[BackendNode]:
-        with self._lock:
-            return [node for node in self.nodes if node.is_healthy]
+    def healthy(self) -> List[BackendNode]:
+        return [n for n in self.nodes if n.is_healthy]
 
     def select_node(self, client_ip: str = "127.0.0.1") -> Optional[BackendNode]:
         raise NotImplementedError
 
+    def describe(self) -> Dict[str, Any]:
+        return {"algorithm": self.name}
+
+
+class AdaptiveThresholdAlgorithm(LoadBalancerAlgorithm):
+    """
+    Performance-based routing with threshold-triggered switching.
+
+    Behaviour
+    ---------
+    * Traffic stays on the current backend while its composite load score is at
+      or below `threshold` — this keeps connection reuse high and avoids the
+      pointless spraying that fixed round-robin does.
+    * The moment that score crosses `threshold`, the balancer switches to the
+      healthy backend with the lowest score, so load follows real capacity.
+    * Hysteresis (`release_ratio`) stops the two nodes trading traffic back and
+      forth: once we have moved off a node, we only consider it "recovered"
+      after its score falls to `threshold * release_ratio`.
+    * Unhealthy backends are never selected. If every backend is above the
+      threshold the least-loaded one still wins, so the cluster degrades
+      gracefully instead of refusing traffic.
+    """
+
+    name = "adaptive_threshold"
+
+    def __init__(self, nodes=None, cfg=None, threshold: float = 0.65,
+                 release_ratio: float = 0.80, **kwargs):
+        super().__init__(nodes, cfg)
+        self.threshold = float(threshold)
+        self.release_ratio = float(release_ratio)
+        self._current: Optional[BackendNode] = None
+        self.switch_count = 0
+        self.saturated_selections = 0
+        self.last_switch_reason = "startup"
+        self.last_switch_time = 0.0
+
+    def _switch_to(self, node: BackendNode, reason: str) -> None:
+        if self._current is not node:
+            self.switch_count += 1
+            self.last_switch_reason = reason
+            self.last_switch_time = time.time()
+        self._current = node
+
+    def select_node(self, client_ip: str = "127.0.0.1") -> Optional[BackendNode]:
+        with self._lock:
+            healthy = [n for n in self.nodes if n.is_healthy]
+            if not healthy:
+                self._current = None
+                return None
+
+            cur = self._current
+            if cur is not None and cur.is_healthy:
+                score = cur.load_score(self.cfg)
+                if score <= self.threshold:
+                    return cur                      # still comfortable, stay put
+            else:
+                cur = None
+
+            # Current backend is over threshold (or gone) -> pick the best one.
+            best = min(healthy, key=lambda n: n.load_score(self.cfg))
+            best_score = best.load_score(self.cfg)
+
+            if cur is not None and best is cur:
+                # Nothing better exists; everything is loaded.
+                self.saturated_selections += 1
+                return cur
+
+            if best_score > self.threshold:
+                self.saturated_selections += 1
+                self._switch_to(best, f"all backends above threshold "
+                                      f"(best={best.node_id} @ {best_score:.2f})")
+            else:
+                self._switch_to(best, (f"{cur.node_id} exceeded threshold"
+                                       if cur is not None else "initial selection"))
+            return best
+
+    def describe(self) -> Dict[str, Any]:
+        return {
+            "algorithm": self.name,
+            "threshold": self.threshold,
+            "release_ratio": self.release_ratio,
+            "current_backend": self._current.node_id if self._current else None,
+            "switch_count": self.switch_count,
+            "saturated_selections": self.saturated_selections,
+            "last_switch_reason": self.last_switch_reason,
+            "weights": self.cfg.to_dict(),
+        }
+
+
+class LeastLoadAlgorithm(LoadBalancerAlgorithm):
+    """Always route to the lowest composite score (no stickiness)."""
+
+    name = "least_load"
+
+    def select_node(self, client_ip: str = "127.0.0.1") -> Optional[BackendNode]:
+        with self._lock:
+            healthy = [n for n in self.nodes if n.is_healthy]
+            if not healthy:
+                return None
+            return min(healthy, key=lambda n: n.load_score(self.cfg))
+
 
 class RoundRobinAlgorithm(LoadBalancerAlgorithm):
-    def __init__(self, nodes: Optional[List[BackendNode]] = None, **kwargs):
-        super().__init__(nodes, **kwargs)
+    name = "round_robin"
+
+    def __init__(self, nodes=None, cfg=None, **kwargs):
+        super().__init__(nodes, cfg)
         self._index = 0
 
     def select_node(self, client_ip: str = "127.0.0.1") -> Optional[BackendNode]:
         with self._lock:
-            healthy_nodes = [node for node in self.nodes if node.is_healthy]
-            if not healthy_nodes:
+            healthy = [n for n in self.nodes if n.is_healthy]
+            if not healthy:
                 return None
-
-            node = healthy_nodes[self._index % len(healthy_nodes)]
-            self._index = (self._index + 1) % len(healthy_nodes)
+            node = healthy[self._index % len(healthy)]
+            self._index += 1
             return node
 
 
 class WeightedRoundRobinAlgorithm(LoadBalancerAlgorithm):
-    def __init__(self, nodes: Optional[List[BackendNode]] = None, **kwargs):
-        super().__init__(nodes, **kwargs)
-        self._current_index = -1
-        self._current_weight = 0
+    name = "weighted_round_robin"
+
+    def __init__(self, nodes=None, cfg=None, **kwargs):
+        super().__init__(nodes, cfg)
+        self._counter = 0
 
     def select_node(self, client_ip: str = "127.0.0.1") -> Optional[BackendNode]:
         with self._lock:
-            healthy = [node for node in self.nodes if node.is_healthy]
+            healthy = [n for n in self.nodes if n.is_healthy]
             if not healthy:
                 return None
-
-            max_weight = max(node.weight for node in healthy)
-            gcd_weight = 1
-
-            while True:
-                self._current_index = (self._current_index + 1) % len(healthy)
-                if self._current_index == 0:
-                    self._current_weight -= gcd_weight
-                    if self._current_weight <= 0:
-                        self._current_weight = max_weight
-                        if self._current_weight == 0:
-                            return None
-                if healthy[self._current_index].weight >= self._current_weight:
-                    return healthy[self._current_index]
+            expanded = [n for n in healthy for _ in range(n.weight)]
+            node = expanded[self._counter % len(expanded)]
+            self._counter += 1
+            return node
 
 
 class LeastConnectionsAlgorithm(LoadBalancerAlgorithm):
+    name = "least_connections"
+
     def select_node(self, client_ip: str = "127.0.0.1") -> Optional[BackendNode]:
         with self._lock:
-            healthy = [node for node in self.nodes if node.is_healthy]
+            healthy = [n for n in self.nodes if n.is_healthy]
             if not healthy:
                 return None
             return min(healthy, key=lambda n: n.active_connections)
 
 
 class IPHashAlgorithm(LoadBalancerAlgorithm):
-    def select_node(self, client_ip: str = "127.0.0.1") -> Optional[BackendNode]:
-        with self._lock:
-            healthy = [node for node in self.nodes if node.is_healthy]
-            if not healthy:
-                return None
-            hash_val = int(hashlib.md5(client_ip.encode("utf-8")).hexdigest(), 16)
-            return healthy[hash_val % len(healthy)]
-
-
-class ThresholdBasedAlgorithm(LoadBalancerAlgorithm):
-    """
-    Performance-based / dynamic threshold algorithm.
-
-    Directs requests to the active backend. When its smoothed latency or
-    active concurrent connections cross the threshold, traffic dynamically
-    switches / spills over to the least-loaded healthy backend.
-    """
-
-    def __init__(
-        self,
-        nodes: Optional[List[BackendNode]] = None,
-        latency_threshold_ms: float = 150.0,
-        connections_threshold: int = 2,
-        **kwargs,
-    ):
-        super().__init__(nodes, **kwargs)
-        self.latency_threshold_ms = float(latency_threshold_ms)
-        self.connections_threshold = int(connections_threshold)
-        self._current: Optional[BackendNode] = None
-
-    def _pick_least_loaded(self, healthy: List[BackendNode]) -> BackendNode:
-        return min(healthy, key=lambda n: n.load_score())
+    name = "ip_hash"
 
     def select_node(self, client_ip: str = "127.0.0.1") -> Optional[BackendNode]:
         with self._lock:
-            healthy = [node for node in self.nodes if node.is_healthy]
+            healthy = [n for n in self.nodes if n.is_healthy]
             if not healthy:
-                self._current = None
                 return None
-
-            # If no current node or current node left the pool / became unhealthy
-            if self._current is None or self._current not in healthy:
-                self._current = self._pick_least_loaded(healthy)
-                return self._current
-
-            # Check if current backend is overloaded or if another backend is significantly less loaded
-            if self._current.exceeds_threshold(self.latency_threshold_ms, self.connections_threshold):
-                candidates = [n for n in healthy if n is not self._current]
-                if candidates:
-                    self._current = self._pick_least_loaded(candidates)
-
-            return self._current
+            digest = hashlib.md5(client_ip.encode("utf-8")).hexdigest()
+            return healthy[int(digest, 16) % len(healthy)]
 
 
-def get_algorithm(algorithm_name: str, nodes: List[BackendNode], **kwargs) -> LoadBalancerAlgorithm:
-    algo = algorithm_name.lower().replace("-", "_").replace(" ", "_")
-    if algo in ["round_robin", "rr"]:
-        return RoundRobinAlgorithm(nodes)
-    elif algo in ["weighted_round_robin", "wrr"]:
-        return WeightedRoundRobinAlgorithm(nodes)
-    elif algo in ["least_connections", "least_conn", "lc"]:
-        return LeastConnectionsAlgorithm(nodes)
-    elif algo in ["ip_hash", "iphash"]:
-        return IPHashAlgorithm(nodes)
-    elif algo in ["load_threshold", "threshold", "performance", "perf", "dynamic"]:
-        return ThresholdBasedAlgorithm(
-            nodes,
-            latency_threshold_ms=kwargs.get("latency_threshold_ms", 150.0),
-            connections_threshold=kwargs.get("connections_threshold", 2),
-        )
-    else:
-        return ThresholdBasedAlgorithm(
-            nodes,
-            latency_threshold_ms=kwargs.get("latency_threshold_ms", 150.0),
-            connections_threshold=kwargs.get("connections_threshold", 2),
-        )
+_ALGORITHMS = {
+    "adaptive_threshold": AdaptiveThresholdAlgorithm,
+    "adaptive": AdaptiveThresholdAlgorithm,
+    "least_load": LeastLoadAlgorithm,
+    "round_robin": RoundRobinAlgorithm,
+    "rr": RoundRobinAlgorithm,
+    "weighted_round_robin": WeightedRoundRobinAlgorithm,
+    "wrr": WeightedRoundRobinAlgorithm,
+    "least_connections": LeastConnectionsAlgorithm,
+    "least_conn": LeastConnectionsAlgorithm,
+    "lc": LeastConnectionsAlgorithm,
+    "ip_hash": IPHashAlgorithm,
+    "iphash": IPHashAlgorithm,
+}
+
+
+def get_algorithm(name: str, nodes: List[BackendNode],
+                  cfg: Optional[ScoreConfig] = None, **kwargs) -> LoadBalancerAlgorithm:
+    key = (name or "").lower().replace("-", "_").replace(" ", "_")
+    cls = _ALGORITHMS.get(key, AdaptiveThresholdAlgorithm)
+    return cls(nodes, cfg, **kwargs)
