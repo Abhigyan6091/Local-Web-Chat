@@ -1,27 +1,32 @@
 """
-main.py — FastAPI WebSocket backend with Private Rooms & Persistence
-===================================================================
-Endpoint : ws://localhost:8000/ws
-Health   : GET http://localhost:8000/health
+main.py — FastAPI WebSocket + HTTP backend with Persistence & Auto-Registration
+==============================================================================
+WebSocket : ws://<host>:<port>/ws
+Health    : GET  http://<host>:<port>/health
+Message   : POST http://<host>:<port>/message   {"client-name": "...", "msg": "...", "message_id": "..." (optional)}
+Feed      : GET  http://<host>:<port>/feed
 """
 
 from __future__ import annotations
 
+import os
+import sys
 import json
 import time
 import uuid
 import logging
-from typing import Dict, Set
-
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
-
-import sys
+import asyncio
+import threading
+import urllib.request
+import urllib.error
 from pathlib import Path
-import logging
+from typing import Dict, Set, Optional
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
 logging.getLogger("asyncio").setLevel(logging.CRITICAL)
-
 
 server_dir = Path(__file__).parent
 if str(server_dir) not in sys.path:
@@ -40,11 +45,22 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# Node configuration from environment
+NODE_ID = os.environ.get("NODE_ID", "Sys2")
+MY_HOST = os.environ.get("MY_HOST", "127.0.0.1")
+MY_PORT = int(os.environ.get("PORT", os.environ.get("BACKEND_PORT", 8000)))
+LB_HOST = os.environ.get("LB_HOST", "127.0.0.1")
+LB_PORT = int(os.environ.get("LB_PORT", 8000))
+AUTO_REGISTER = os.environ.get("AUTO_REGISTER", "1") == "1"
+
 # ── Initialize Database ──────────────────────────────────────────────────────
-db.init_db()
+try:
+    db.init_db()
+except Exception as e:
+    log.warning(f"Database init warning: {e}")
 
 # ── App ───────────────────────────────────────────────────────────────────────
-app = FastAPI(title="Group Chat Server with Private Rooms", version="2.0.0")
+app = FastAPI(title="Distributed Group Chat Server", version="3.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -53,15 +69,66 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+HTTP_ROOM_ID = "global"
+
+
+# ── Auto-Registration & Heartbeat Thread ─────────────────────────────────────
+def _register_with_load_balancer():
+    """Announces this backend to the Load Balancer so it is dynamically discovered."""
+    if not AUTO_REGISTER:
+        return
+
+    register_url = f"http://{LB_HOST}:{LB_PORT}/register"
+    payload = json.dumps({
+        "id": NODE_ID,
+        "host": MY_HOST,
+        "port": MY_PORT,
+        "weight": 1
+    }).encode("utf-8")
+
+    def _loop():
+        # Small delay to let LB / network come up
+        time.sleep(1.0)
+        while True:
+            try:
+                req = urllib.request.Request(
+                    register_url,
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST"
+                )
+                with urllib.request.urlopen(req, timeout=3.0) as resp:
+                    if resp.status == 200:
+                        log.info(f"Registered with Load Balancer at {register_url} as {NODE_ID}")
+            except Exception:
+                pass
+            time.sleep(10.0)
+
+    t = threading.Thread(target=_loop, name="LB-AutoRegister", daemon=True)
+    t.start()
+
+
+@app.on_event("startup")
+async def startup_event():
+    _register_with_load_balancer()
+
+
+# ── Request/response models for the required HTTP routes ────────────────────
+class MessageIn(BaseModel):
+    client_name: str = Field(..., alias="client-name")
+    msg: str
+    message_id: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
 
 # ── Connection Manager ────────────────────────────────────────────────────────
 class RoomConnectionManager:
     """Manages WebSocket connections partitioned by room_id."""
 
     def __init__(self) -> None:
-        # Maps WebSocket → {"id": str, "username": str, "room_id": str}
         self._clients: Dict[WebSocket, dict] = {}
-        # Maps room_id → set of WebSockets
         self._room_members: Dict[str, Set[WebSocket]] = {}
 
     async def _send(self, ws: WebSocket, payload: dict) -> None:
@@ -108,19 +175,16 @@ class RoomConnectionManager:
             await self._send(ws, {"type": "error", "message": "Room not found"})
             return False
 
-        # 1. Leave current room if in one
         if current_room_id and current_room_id in self._room_members:
             self._room_members[current_room_id].discard(ws)
             if not self._room_members[current_room_id]:
                 del self._room_members[current_room_id]
-            # Notify old room
             await self.broadcast_to_room(current_room_id, {
                 "type": "user_left",
                 "roomId": current_room_id,
                 "username": username
             })
 
-        # 2. Join target room
         client["room_id"] = target_room_id
         if target_room_id not in self._room_members:
             self._room_members[target_room_id] = set()
@@ -128,7 +192,6 @@ class RoomConnectionManager:
 
         log.info("User %s switched to room: %s (%s)", username, room_info["name"], target_room_id)
 
-        # 3. Send room info + room history + current user list to client
         history = db.get_room_messages(target_room_id)
         room_users = self.get_room_users(target_room_id)
 
@@ -139,7 +202,6 @@ class RoomConnectionManager:
             "users": [u for u in room_users if u != username]
         })
 
-        # 4. Broadcast user_joined to new room
         await self.broadcast_to_room(target_room_id, {
             "type": "user_joined",
             "roomId": target_room_id,
@@ -179,7 +241,6 @@ class RoomConnectionManager:
         sender_id = client["id"]
         now = int(time.time() * 1000)
 
-        # Encrypt + sign + persist (all crypto happens inside save_message)
         msg_record = db.save_message(room_id, username, sender_id, text, now)
 
         payload = {
@@ -194,16 +255,85 @@ class RoomConnectionManager:
         }
         await self.broadcast_to_room(room_id, payload)
 
+    async def broadcast_http_message(self, room_id: str, payload: dict) -> None:
+        await self.broadcast_to_room(room_id, payload)
+
 
 manager = RoomConnectionManager()
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
+# ── HTTP Routes (required by assignment spec) ────────────────────────────────
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "total_clients": len(manager._clients)}
+    return {
+        "status": "ok",
+        "service": "Backend",
+        "node_id": NODE_ID,
+        "total_clients": len(manager._clients)
+    }
 
+
+@app.post("/message")
+async def post_message(request: Request) -> dict:
+    """
+    Accepts {"client-name": ..., "msg": ...} (message_id optional).
+    Also supports form-urlencoded / raw JSON payloads.
+    Persists with UUID deduplication and broadcasts to global room.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    client_name = str(body.get("client-name") or body.get("client_name") or "Anonymous").strip()[:50]
+    text = str(body.get("msg") or body.get("message") or body.get("text") or "").strip()
+    message_id = body.get("message_id") or body.get("messageId")
+    now = int(time.time() * 1000)
+
+    if not text:
+        return {"status": "error", "message": "msg cannot be empty"}
+
+    sender_id = f"http-{client_name}"
+
+    msg_record = db.save_message(
+        room_id=HTTP_ROOM_ID,
+        sender=client_name,
+        sender_id=sender_id,
+        text=text,
+        timestamp=now,
+        message_id=str(message_id) if message_id else None,
+    )
+
+    if not msg_record.get("duplicate"):
+        await manager.broadcast_http_message(HTTP_ROOM_ID, {
+            "type": "message",
+            "roomId": HTTP_ROOM_ID,
+            "sender": client_name,
+            "senderId": sender_id,
+            "text": msg_record["text"],
+            "timestamp": msg_record["timestamp"],
+            "verified": msg_record["verified"],
+            "tampered": msg_record["tampered"],
+        })
+
+    return {
+        "status": "ok",
+        "message_id": msg_record["id"],
+        "duplicate": msg_record.get("duplicate", False),
+        "timestamp": msg_record["timestamp"],
+        "node_id": NODE_ID
+    }
+
+
+@app.get("/feed")
+async def get_feed(limit: int = 500) -> dict:
+    """Returns all messages across the shared chat."""
+    messages = db.get_all_messages(limit=limit)
+    return {"status": "ok", "count": len(messages), "messages": messages, "node_id": NODE_ID}
+
+
+# ── WebSocket ─────────────────────────────────────────────────────────────────
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket) -> None:
@@ -230,8 +360,6 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 room_name = str(msg.get("name", "Private Room")).strip()[:30] or "Private Room"
                 new_room = db.create_room(room_name, is_private=True)
                 log.info("Room created: %s (code=%s)", new_room["name"], new_room["code"])
-                
-                # Send confirmation and automatically join the room
                 await ws.send_text(json.dumps({"type": "room_created", "room": new_room}))
                 await manager.switch_room(ws, new_room["id"])
 

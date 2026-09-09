@@ -48,26 +48,75 @@ logger = logging.getLogger("LoadBalancer")
 
 
 class LoadBalancerRequestHandler(BaseHTTPRequestHandler):
-    server_version = "Sys1-LoadBalancer/1.0"
+    server_version = "Sys1-LoadBalancer/2.0"
 
     def log_message(self, format, *args):
         pass
 
     def _handle_lb_status(self):
         lb_server = self.server
+        with lb_server._nodes_lock:
+            nodes_list = [node.to_dict() for node in lb_server.nodes]
+            healthy_count = len([n for n in lb_server.nodes if n.is_healthy])
+            total_count = len(lb_server.nodes)
+
         data = {
             "service": "Sys1-LoadBalancer",
             "algorithm": lb_server.algorithm_name,
             "host": lb_server.host,
             "port": lb_server.port,
+            "latency_threshold_ms": getattr(lb_server, "latency_threshold_ms", 150.0),
+            "connections_threshold": getattr(lb_server, "connections_threshold", 8),
             "uptime_seconds": round(time.time() - lb_server.start_time, 2),
             "total_requests_proxied": lb_server.request_count,
-            "backends_count": len(lb_server.nodes),
-            "healthy_backends_count": len([n for n in lb_server.nodes if n.is_healthy]),
-            "backends": [node.to_dict() for node in lb_server.nodes]
+            "backends_count": total_count,
+            "healthy_backends_count": healthy_count,
+            "backends": nodes_list
         }
         payload = json.dumps(data, indent=2).encode("utf-8")
         self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _handle_register(self):
+        """Dynamic backend discovery endpoint: POST /register or POST /lb/register"""
+        lb_server = self.server
+        content_length = int(self.headers.get("Content-Length", 0))
+        if content_length <= 0:
+            self._send_json_response(400, {"status": "error", "message": "Missing JSON request body"})
+            return
+
+        try:
+            body_data = self.rfile.read(content_length).decode("utf-8")
+            payload = json.loads(body_data)
+        except Exception as e:
+            self._send_json_response(400, {"status": "error", "message": f"Invalid JSON: {e}"})
+            return
+
+        node_id = payload.get("id") or payload.get("node_id") or payload.get("name")
+        host = payload.get("host") or self.client_address[0]
+        port = int(payload.get("port", 8000))
+        weight = int(payload.get("weight", 1))
+
+        if not node_id:
+            node_id = f"{host}:{port}"
+
+        node = lb_server.register_backend(node_id=str(node_id), host=str(host), port=port, weight=weight)
+
+        logger.info(f"[DYNAMIC DISCOVERY] Backend '{node_id}' ({node.url}) successfully registered/updated via API.")
+        self._send_json_response(200, {
+            "status": "ok",
+            "message": f"Backend '{node_id}' registered successfully",
+            "registered_node": node.to_dict(),
+            "total_backends": len(lb_server.nodes)
+        })
+
+    def _send_json_response(self, status_code: int, data: Dict[str, Any]):
+        payload = json.dumps(data, indent=2).encode("utf-8")
+        self.send_response(status_code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -119,7 +168,6 @@ class LoadBalancerRequestHandler(BaseHTTPRequestHandler):
         logger.info(f"[WS #{req_id}] Tunnelling WebSocket {self.path} -> {node.node_id} ({node.host}:{node.port})")
 
         try:
-            # Open a raw TCP socket to the chosen backend
             backend_sock = socket.create_connection((node.host, node.port), timeout=lb_server.timeout)
         except Exception as e:
             node.decrement_connections(success=False)
@@ -130,7 +178,6 @@ class LoadBalancerRequestHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            # Forward the original HTTP Upgrade request to the backend
             request_line = f"{self.command} {self.path} {self.request_version}\r\n"
             header_lines = "".join(
                 f"{k}: {v}\r\n"
@@ -152,7 +199,6 @@ class LoadBalancerRequestHandler(BaseHTTPRequestHandler):
             ).encode("latin-1")
             backend_sock.sendall(raw_request)
 
-            # Read the backend's response (the 101 Switching Protocols)
             response_data = b""
             while b"\r\n\r\n" not in response_data:
                 chunk = backend_sock.recv(4096)
@@ -160,11 +206,9 @@ class LoadBalancerRequestHandler(BaseHTTPRequestHandler):
                     break
                 response_data += chunk
 
-            # Forward the 101 response back to the browser's raw socket
             client_sock = self.connection
             client_sock.sendall(response_data)
 
-            # Bi-directional relay until either side closes
             t1 = threading.Thread(
                 target=self._relay_bytes,
                 args=(client_sock, backend_sock, "client->backend"),
@@ -191,8 +235,11 @@ class LoadBalancerRequestHandler(BaseHTTPRequestHandler):
             logger.info(f"[WS #{req_id}] WebSocket tunnel closed -> {node.node_id}")
 
     def do_GET(self):
-        if self.path == "/lb/status":
+        if self.path in ["/lb/status", "/status"]:
             self._handle_lb_status()
+            return
+        if self.path in ["/lb/health", "/health"]:
+            self._send_json_response(200, {"status": "ok", "service": "Sys1-LoadBalancer"})
             return
         if self._is_websocket_request():
             self._handle_websocket_tunnel()
@@ -200,6 +247,9 @@ class LoadBalancerRequestHandler(BaseHTTPRequestHandler):
         self._proxy_request("GET")
 
     def do_POST(self):
+        if self.path in ["/register", "/lb/register", "/register_backend"]:
+            self._handle_register()
+            return
         self._proxy_request("POST")
 
     def do_PUT(self):
@@ -209,7 +259,6 @@ class LoadBalancerRequestHandler(BaseHTTPRequestHandler):
         self._proxy_request("DELETE")
 
     def do_OPTIONS(self):
-        # Return CORS preflight directly from the LB — no need to proxy OPTIONS
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH")
@@ -232,14 +281,14 @@ class LoadBalancerRequestHandler(BaseHTTPRequestHandler):
         if content_length > 0:
             body = self.rfile.read(content_length)
 
-        max_attempts = min(len(lb_server.nodes), lb_server.retry_attempts)
+        max_attempts = max(1, min(len(lb_server.nodes), lb_server.retry_attempts))
         attempt = 0
         last_error = None
 
         while attempt < max_attempts:
             attempt += 1
             node = lb_server.algorithm.select_node(client_ip=client_ip)
-            
+
             if not node:
                 self._send_error_response(
                     503,
@@ -251,18 +300,18 @@ class LoadBalancerRequestHandler(BaseHTTPRequestHandler):
 
             target_url = f"{node.url}{self.path}"
             node.increment_connections()
-            
+
             try:
                 req = urllib.request.Request(
                     url=target_url,
                     data=body if method in ["POST", "PUT", "PATCH"] else None,
                     method=method
                 )
-                
+
                 for header_key, header_val in self.headers.items():
                     if header_key.lower() not in ["host", "content-length"]:
                         req.add_header(header_key, header_val)
-                
+
                 req.add_header("X-Forwarded-For", client_ip)
                 req.add_header("X-Forwarded-Host", self.headers.get("Host", f"{lb_server.host}:{lb_server.port}"))
                 req.add_header("X-Forwarded-Proto", "http")
@@ -276,16 +325,18 @@ class LoadBalancerRequestHandler(BaseHTTPRequestHandler):
                     backend_latency_ms = (time.time() - t_backend_start) * 1000.0
 
                     node.decrement_connections(success=True)
-                    node.mark_healthy(backend_latency_ms)
+                    # Record actual backend processing latency
+                    node.record_request_latency(backend_latency_ms)
 
                     self.send_response(backend_status)
                     for k, v in backend_headers.items():
                         if k.lower() not in ["transfer-encoding", "content-length"]:
                             self.send_header(k, v)
-                    
+
                     self.send_header("Content-Length", str(len(backend_body)))
                     self.send_header("X-Load-Balancer", "Sys1")
                     self.send_header("X-Selected-Backend", node.node_id)
+                    self.send_header("X-Backend-Server", node.node_id)
                     self.send_header("X-Proxy-Total-Latency-Ms", f"{proxy_latency_ms:.2f}")
                     self.end_headers()
                     self.wfile.write(backend_body)
@@ -300,7 +351,7 @@ class LoadBalancerRequestHandler(BaseHTTPRequestHandler):
                 backend_body = http_err.read()
                 proxy_latency_ms = (time.time() - start_time) * 1000.0
                 node.decrement_connections(success=(http_err.code < 500))
-                
+
                 self.send_response(http_err.code)
                 for k, v in http_err.headers.items():
                     if k.lower() not in ["transfer-encoding", "content-length"]:
@@ -308,9 +359,10 @@ class LoadBalancerRequestHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(backend_body)))
                 self.send_header("X-Load-Balancer", "Sys1")
                 self.send_header("X-Selected-Backend", node.node_id)
+                self.send_header("X-Backend-Server", node.node_id)
                 self.end_headers()
                 self.wfile.write(backend_body)
-                
+
                 logger.info(
                     f"[REQ #{req_id}] {method} {self.path} -> {node.node_id} "
                     f"[{http_err.code}] (took {proxy_latency_ms:.1f}ms)"
@@ -343,7 +395,7 @@ class LoadBalancerRequestHandler(BaseHTTPRequestHandler):
             "timestamp": time.time()
         }
         payload = json.dumps(data).encode("utf-8")
-        
+
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
@@ -362,31 +414,63 @@ class LoadBalancerServer(ThreadingHTTPServer):
         host: str,
         port: int,
         nodes: List[BackendNode],
-        algorithm_name: str = "round_robin",
+        algorithm_name: str = "load_threshold",
         health_interval: float = 3.0,
         health_timeout: float = 1.5,
         timeout: float = 5.0,
-        retry_attempts: int = 2
+        retry_attempts: int = 2,
+        latency_threshold_ms: float = 150.0,
+        connections_threshold: int = 8
     ):
         self.host = host
         self.port = port
-        self.nodes = nodes
+        self.nodes = list(nodes)
         self.algorithm_name = algorithm_name
-        self.algorithm: LoadBalancerAlgorithm = get_algorithm(algorithm_name, nodes)
+        self.latency_threshold_ms = float(latency_threshold_ms)
+        self.connections_threshold = int(connections_threshold)
+        self._nodes_lock = threading.Lock()
+
+        self.algorithm: LoadBalancerAlgorithm = get_algorithm(
+            algorithm_name,
+            self.nodes,
+            latency_threshold_ms=latency_threshold_ms,
+            connections_threshold=connections_threshold,
+        )
         self.timeout = timeout
         self.retry_attempts = max(1, retry_attempts)
         self.start_time = time.time()
         self.request_count = 0
-        
-        self.health_checker = HealthChecker(nodes, interval_seconds=health_interval, timeout_seconds=health_timeout)
+
+        self.health_checker = HealthChecker(self.nodes, interval_seconds=health_interval, timeout_seconds=health_timeout)
         self.health_checker.start()
-        
+
         super().__init__((host, port), LoadBalancerRequestHandler)
 
+    def register_backend(self, node_id: str, host: str, port: int, weight: int = 1) -> BackendNode:
+        """Thread-safe dynamic backend registration (auto-discovery)."""
+        with self._nodes_lock:
+            for n in self.nodes:
+                if n.node_id == node_id or (n.host == host and n.port == port):
+                    n.host = host
+                    n.port = port
+                    n.weight = max(1, int(weight))
+                    n.url = f"http://{host}:{port}"
+                    n.mark_healthy()
+                    self.algorithm.add_or_update_node(n)
+                    self.health_checker.add_or_update_node(n)
+                    return n
+
+            new_node = BackendNode(node_id=node_id, host=host, port=port, weight=weight)
+            self.nodes.append(new_node)
+            self.algorithm.add_or_update_node(new_node)
+            self.health_checker.add_or_update_node(new_node)
+            return new_node
+
     def update_backends(self, new_nodes: List[BackendNode]):
-        self.nodes = new_nodes
-        self.algorithm.set_nodes(new_nodes)
-        self.health_checker.nodes = new_nodes
+        with self._nodes_lock:
+            self.nodes = list(new_nodes)
+            self.algorithm.set_nodes(new_nodes)
+            self.health_checker.set_nodes(new_nodes)
 
 
 def create_nodes_from_config(config_dict: Dict[str, Any]) -> List[BackendNode]:
@@ -406,16 +490,14 @@ def run_load_balancer(
     host: str = "0.0.0.0",
     port: int = 8000,
     nodes: Optional[List[BackendNode]] = None,
-    algorithm: str = "round_robin",
+    algorithm: str = "load_threshold",
     health_interval: float = 3.0,
-    health_timeout: float = 1.5
+    health_timeout: float = 1.5,
+    latency_threshold_ms: float = 150.0,
+    connections_threshold: int = 8
 ):
-    if not nodes:
-        nodes = [
-            BackendNode("Sys2", "127.0.0.1", 8001),
-            BackendNode("Sys3", "127.0.0.1", 8002),
-            BackendNode("Sys4", "127.0.0.1", 8003)
-        ]
+    if nodes is None:
+        nodes = []
 
     server = LoadBalancerServer(
         host=host,
@@ -423,14 +505,19 @@ def run_load_balancer(
         nodes=nodes,
         algorithm_name=algorithm,
         health_interval=health_interval,
-        health_timeout=health_timeout
+        health_timeout=health_timeout,
+        latency_threshold_ms=latency_threshold_ms,
+        connections_threshold=connections_threshold
     )
 
     logger.info("=" * 60)
     logger.info(f"Sys1 Load Balancer running on http://{host}:{port}")
     logger.info(f"Algorithm : {algorithm.upper()}")
+    logger.info(f"  latency_threshold_ms   = {latency_threshold_ms}")
+    logger.info(f"  connections_threshold  = {connections_threshold}")
     logger.info(f"Status URL: http://{host}:{port}/lb/status")
-    logger.info(f"Configured Backends ({len(nodes)} total):")
+    logger.info(f"Dynamic Registration URL: http://{host}:{port}/register (POST)")
+    logger.info(f"Configured Initial Backends ({len(nodes)} total):")
     for n in nodes:
         logger.info(f"  - [{n.node_id}] {n.url} (weight: {n.weight})")
     logger.info("=" * 60)
@@ -446,41 +533,54 @@ def run_load_balancer(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Sys1 HTTP Reverse Proxy Load Balancer")
+    parser = argparse.ArgumentParser(description="Sys1 HTTP Reverse Proxy Dynamic Load Balancer")
     parser.add_argument("--config", type=str, default=None, help="Path to config JSON file")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=8000, help="Port to bind (default: 8000)")
-    parser.add_argument("--algorithm", type=str, default="round_robin", help="Algorithm: round_robin, weighted_round_robin, least_connections, ip_hash")
+    parser.add_argument(
+        "--algorithm", type=str, default="load_threshold",
+        help="Algorithm: load_threshold, round_robin, weighted_round_robin, least_connections, ip_hash"
+    )
     parser.add_argument("--backends", type=str, default=None, help="Comma-separated backend URLs, e.g. http://127.0.0.1:8001,http://127.0.0.1:8002")
-    
+    parser.add_argument(
+        "--threshold-ms", type=float, default=150.0,
+        help="For --algorithm load_threshold: switch away from the current backend when its smoothed latency exceeds this many ms"
+    )
+    parser.add_argument(
+        "--connections-threshold", type=int, default=8,
+        help="For --algorithm load_threshold: switch away from the current backend when its active connections exceed this count"
+    )
+
     args = parser.parse_args()
 
     nodes = []
+    host = args.host
+    port = args.port
+    algo = args.algorithm
+    threshold_ms = args.threshold_ms
+    conn_threshold = args.connections_threshold
+
     if args.config and os.path.exists(args.config):
         with open(args.config, "r") as f:
             cfg = json.load(f)
             nodes = create_nodes_from_config(cfg)
             lb_cfg = cfg.get("load_balancer", {})
-            host = lb_cfg.get("host", args.host)
-            port = lb_cfg.get("port", args.port)
-            algo = lb_cfg.get("algorithm", args.algorithm)
+            host = lb_cfg.get("host", host)
+            port = lb_cfg.get("port", port)
+            algo = lb_cfg.get("algorithm", algo)
+            threshold_ms = lb_cfg.get("threshold_ms", threshold_ms)
+            conn_threshold = lb_cfg.get("connections_threshold", conn_threshold)
     elif args.backends:
         backend_urls = [u.strip() for u in args.backends.split(",") if u.strip()]
         for idx, u in enumerate(backend_urls):
             parsed = urlparse(u if "://" in u else f"http://{u}")
             node_id = f"Sys{idx+2}"
             nodes.append(BackendNode(node_id, parsed.hostname or "127.0.0.1", parsed.port or 8000))
-        host = args.host
-        port = args.port
-        algo = args.algorithm
     else:
-        host = args.host
-        port = args.port
-        algo = args.algorithm
-        nodes = [
-            BackendNode("Sys2", "127.0.0.1", 8001),
-            BackendNode("Sys3", "127.0.0.1", 8002),
-            BackendNode("Sys4", "127.0.0.1", 8003)
-        ]
+        # Default empty or initial fallback
+        nodes = []
 
-    run_load_balancer(host=host, port=port, nodes=nodes, algorithm=algo)
+    run_load_balancer(
+        host=host, port=port, nodes=nodes, algorithm=algo,
+        latency_threshold_ms=threshold_ms, connections_threshold=conn_threshold
+    )

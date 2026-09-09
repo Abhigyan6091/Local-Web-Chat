@@ -3,7 +3,8 @@ import threading
 import logging
 import urllib.request
 import urllib.error
-from typing import List
+from typing import List, Optional
+
 try:
     from load_balancer.algorithms import BackendNode
 except ImportError:
@@ -14,13 +15,27 @@ except ImportError:
 
 logger = logging.getLogger("HealthChecker")
 
+
 class HealthChecker:
     def __init__(self, nodes: List[BackendNode], interval_seconds: float = 3.0, timeout_seconds: float = 1.5):
-        self.nodes = nodes
+        self.nodes = list(nodes)
         self.interval = max(0.5, float(interval_seconds))
         self.timeout = max(0.2, float(timeout_seconds))
         self._running = False
-        self._thread: threading.Thread = None
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+
+    def set_nodes(self, nodes: List[BackendNode]):
+        with self._lock:
+            self.nodes = list(nodes)
+
+    def add_or_update_node(self, node: BackendNode):
+        with self._lock:
+            for i, n in enumerate(self.nodes):
+                if n.node_id == node.node_id or (n.host == node.host and n.port == node.port):
+                    self.nodes[i] = node
+                    return
+            self.nodes.append(node)
 
     def start(self):
         if self._running:
@@ -40,15 +55,16 @@ class HealthChecker:
         health_url = f"{node.url}/health"
         was_healthy = node.is_healthy
         t0 = time.time()
-        
+
         try:
             req = urllib.request.Request(health_url, headers={"User-Agent": "LoadBalancer-HealthChecker/1.0"})
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                latency_ms = (time.time() - t0) * 1000.0
+                ping_latency_ms = (time.time() - t0) * 1000.0
                 if resp.status == 200:
-                    node.mark_healthy(latency_ms)
+                    # Mark healthy without polluting the request latency EMA
+                    node.mark_healthy()
                     if not was_healthy:
-                        logger.info(f"[HEALTH RESTORED] Backend {node.node_id} ({node.url}) is now UP (latency: {latency_ms:.2f}ms)")
+                        logger.info(f"[HEALTH RESTORED] Backend {node.node_id} ({node.url}) is now UP (ping: {ping_latency_ms:.2f}ms)")
                 else:
                     node.mark_unhealthy()
                     if was_healthy:
@@ -60,6 +76,8 @@ class HealthChecker:
 
     def _run_loop(self):
         while self._running:
-            for node in list(self.nodes):
+            with self._lock:
+                current_nodes = list(self.nodes)
+            for node in current_nodes:
                 self._check_node(node)
             time.sleep(self.interval)
