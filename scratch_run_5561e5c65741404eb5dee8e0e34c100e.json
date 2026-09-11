@@ -1,0 +1,129 @@
+{
+  "run": {
+    "id": "5561e5c65741404eb5dee8e0e34c100e",
+    "submission_id": 103,
+    "board": "breakpoint",
+    "roll_id": "12340050",
+    "name": "ABHIGYAN SHARMA",
+    "url": "http://10.1.75.79:4237",
+    "status": "DONE",
+    "queued_at": 1789113521.9684916,
+    "started_at": 1789113558.2298052,
+    "finished_at": 1789113574.2820575,
+    "payload_mode": "json",
+    "progress": "complete",
+    "mean_response_ms": null,
+    "peak_rps": 0.0,
+    "peak_concurrency": 200,
+    "err_rate_overall": 1.0,
+    "total_requests": 5000,
+    "total_expected": 5000,
+    "total_errors": 5000,
+    "total_successes": 0,
+    "break_concurrency": 200,
+    "stages_cleared": 0,
+    "incomplete": 0,
+    "accepted_msgs": 0,
+    "delivered": null,
+    "lost": null,
+    "ambiguous": 4767,
+    "completeness": null,
+    "integrity_ok": 0,
+    "integrity_note": "no messages were accepted during the run",
+    "integrity_status": "no_messages",
+    "correctness_checked": 0,
+    "correctness_passed": 0,
+    "correctness": null,
+    "invalid_reason": null,
+    "error": null,
+    "stop_reason": "error rate 100.0% exceeded 20% at 200 users",
+    "badges": [],
+    "feed_percent": null,
+    "board_label": "Breakpoint (ramp until >20% errors)"
+  },
+  "stages": [
+    {
+      "run_id": "5561e5c65741404eb5dee8e0e34c100e",
+      "stage_idx": 0,
+      "concurrency": 200,
+      "request_budget": 5000,
+      "requests": 5000,
+      "successes": 0,
+      "errors": 5000,
+      "rps": 0.0,
+      "mean_ms": null,
+      "err_rate": 1.0,
+      "timeouts": 0,
+      "timed_out": 0
+    }
+  ],
+  "series": [
+    {
+      "run_id": "5561e5c65741404eb5dee8e0e34c100e",
+      "t_sec": 5,
+      "stage_idx": 0,
+      "rps": 0.0,
+      "errors": 873,
+      "mean_ms": null
+    },
+    {
+      "run_id": "5561e5c65741404eb5dee8e0e34c100e",
+      "t_sec": 6,
+      "stage_idx": 0,
+      "rps": 0.0,
+      "errors": 921,
+      "mean_ms": null
+    },
+    {
+      "run_id": "5561e5c65741404eb5dee8e0e34c100e",
+      "t_sec": 7,
+      "stage_idx": 0,
+      "rps": 0.0,
+      "errors": 926,
+      "mean_ms": null
+    },
+    {
+      "run_id": "5561e5c65741404eb5dee8e0e34c100e",
+      "t_sec": 8,
+      "stage_idx": 0,
+      "rps": 0.0,
+      "errors": 969,
+      "mean_ms": null
+    },
+    {
+      "run_id": "5561e5c65741404eb5dee8e0e34c100e",
+      "t_sec": 9,
+      "stage_idx": 0,
+      "rps": 0.0,
+      "errors": 954,
+      "mean_ms": null
+    },
+    {
+      "run_id": "5561e5c65741404eb5dee8e0e34c100e",
+      "t_sec": 10,
+      "stage_idx": 0,
+      "rps": 0.0,
+      "errors": 356,
+      "mean_ms": null
+    },
+    {
+      "run_id": "5561e5c65741404eb5dee8e0e34c100e",
+      "t_sec": 11,
+      "stage_idx": 0,
+      "rps": 0.0,
+      "errors": 1,
+      "mean_ms": null
+    }
+  ],
+  "sibling": {
+    "run_id": "3bda5554105f4b2b83997b6c5a5efd9c",
+    "board": "static",
+    "label": "Static load (250 \u2192 1000 users)"
+  },
+  "break_pct": 20,
+  "queue": {
+    "running": null,
+    "queued": 0,
+    "est_run_seconds": 73.5
+  }
+}

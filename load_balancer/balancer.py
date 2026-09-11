@@ -34,6 +34,14 @@ from __future__ import annotations
 
 import os
 import sys
+
+try:
+    import resource
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (min(65535, hard), hard))
+except Exception:
+    pass
+
 import json
 import time
 import asyncio
@@ -206,15 +214,17 @@ def build_upgrade_request(head: HttpHead, node: BackendNode, client_ip: str) -> 
 class ConnectionPool:
     """Keep-alive sockets per backend; avoids a TCP handshake per request."""
 
-    def __init__(self, max_idle: int = 32):
-        self._idle: Dict[str, Deque[Tuple[asyncio.StreamReader, asyncio.StreamWriter]]] = {}
+    def __init__(self, max_idle: int = 256, max_idle_age: float = 20.0):
+        self._idle: Dict[str, Deque[Tuple[asyncio.StreamReader, asyncio.StreamWriter, float]]] = {}
         self.max_idle = max_idle
+        self.max_idle_age = max_idle_age
 
     async def acquire(self, node: BackendNode, timeout: float):
         q = self._idle.get(node.node_id)
+        now = time.monotonic()
         while q:
-            reader, writer = q.popleft()
-            if not writer.is_closing() and not reader.at_eof():
+            reader, writer, ts = q.popleft()
+            if not writer.is_closing() and not reader.at_eof() and (now - ts) < self.max_idle_age:
                 return reader, writer
             try:
                 writer.close()
@@ -224,7 +234,11 @@ class ConnectionPool:
             asyncio.open_connection(node.host, node.port), timeout=timeout)
 
     def release(self, node: BackendNode, reader, writer) -> None:
-        if writer.is_closing():
+        if writer.is_closing() or reader.at_eof():
+            try:
+                writer.close()
+            except Exception:
+                pass
             return
         q = self._idle.setdefault(node.node_id, deque())
         if len(q) >= self.max_idle:
@@ -233,15 +247,15 @@ class ConnectionPool:
             except Exception:
                 pass
             return
-        q.append((reader, writer))
+        q.append((reader, writer, time.monotonic()))
 
     def drop(self, node: BackendNode) -> None:
         q = self._idle.pop(node.node_id, None)
         if not q:
             return
-        for _, writer in q:
+        for item in q:
             try:
-                writer.close()
+                item[1].close()
             except Exception:
                 pass
 
@@ -256,8 +270,8 @@ class LoadBalancer:
                  threshold: float = 0.55, release_ratio: float = 0.80,
                  score_cfg: Optional[ScoreConfig] = None,
                  health_interval: float = 1.0, health_timeout: float = 1.0,
-                 connect_timeout: float = 2.0, request_timeout: float = 30.0,
-                 retry_attempts: int = 2, static_dir: Optional[str] = None):
+                 connect_timeout: float = 5.0, request_timeout: float = 30.0,
+                 retry_attempts: int = 3, static_dir: Optional[str] = None):
         self.host, self.port = host, port
         self.nodes = nodes
         self.score_cfg = score_cfg or ScoreConfig()
@@ -592,18 +606,39 @@ class LoadBalancer:
                         backend_writer.close()
                     except Exception:
                         pass
-                self.pool.drop(node)
-
                 if sent_any:
                     # Response already started streaming to the client; we cannot
                     # safely retry on another backend.
                     self.error_count += 1
                     return False
 
-                node.mark_unhealthy()
+                if not (isinstance(exc, OSError) and getattr(exc, 'errno', None) == 24):
+                    self.pool.drop(node)
+                    if node.mark_unhealthy():
+                        logger.warning("[FAILOVER] %s exceeded failure threshold — marked UNHEALTHY", node.node_id)
                 self.retry_count += 1
                 logger.warning("[FAILOVER] %s failed on %s %s (%s) — trying another backend",
                                node.node_id, head.method, head.path, last_error)
+
+        # If all retries failed, attempt one emergency fallback to the least-loaded backend
+        if self.nodes and not sent_any:
+            fallback_node = min(self.nodes, key=lambda n: n.load_score(self.score_cfg))
+            try:
+                fallback_reader, fallback_writer = await self.pool.acquire(
+                    fallback_node, self.connect_timeout)
+                fallback_writer.write(build_request(head, fallback_node, client_ip, body, extra))
+                await fallback_writer.drain()
+                resp = await asyncio.wait_for(read_head(fallback_reader), timeout=self.request_timeout)
+                if resp is not None:
+                    keep_backend = await self._relay_response(
+                        resp, fallback_reader, client_writer, fallback_node)
+                    if keep_backend:
+                        self.pool.release(fallback_node, fallback_reader, fallback_writer)
+                    else:
+                        fallback_writer.close()
+                    return True
+            except Exception:
+                pass
 
         self.error_count += 1
         await self._send_json(client_writer, 503, {

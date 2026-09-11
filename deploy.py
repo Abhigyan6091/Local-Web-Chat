@@ -121,6 +121,7 @@ def write_file(sftp, content: str, remote: str) -> None:
 
 # ── supervised launcher ──────────────────────────────────────────────────────
 SUPERVISOR = """#!/bin/bash
+ulimit -n 65535 2>/dev/null || true
 # Restarts the service if it ever exits, so a crash does not take the node out
 # of the cluster for the rest of the evaluation window.
 LOG="$1"; shift
@@ -134,7 +135,9 @@ done
 
 def start_supervised(client, sftp, name: str, log: str, command: str,
                      env: str = "") -> None:
-    script = (f"#!/bin/bash\ncd {REMOTE_DIR}\n{env}\n"
+    script = (f"#!/bin/bash\n"
+              f"ulimit -n 65535 2>/dev/null || true\n"
+              f"cd {REMOTE_DIR}\n{env}\n"
               f"exec bash {REMOTE_DIR}/supervisor.sh {log} {command}\n")
     path = f"{REMOTE_DIR}/start_{name}.sh"
     write_file(sftp, script, path)

@@ -22,6 +22,14 @@ from __future__ import annotations
 
 import os
 import sys
+
+try:
+    import resource
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (min(65535, hard), hard))
+except Exception:
+    pass
+
 import json
 import time
 import uuid
@@ -43,10 +51,16 @@ except ImportError:
     from server import db_async as db
 
 try:
+    import crypto_utils as crypto
+except ImportError:
+    from server import crypto_utils as crypto
+
+try:
     from common import sysmetrics
 except ImportError:
     sys.path.insert(0, str(server_dir.parent / "common"))
     import sysmetrics
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -64,6 +78,16 @@ HTTP_ROOM_ID = "global"
 # generator posts for a very long time; oldest messages are dropped from the
 # in-memory cache first (they remain in PostgreSQL).
 FEED_MAX_ITEMS = int(os.environ.get("FEED_MAX_ITEMS", "150000"))
+
+# Write-behind buffer: POST /message adds here; background flusher does the DB
+# INSERT in batches so the HTTP response is not blocked by PostgreSQL latency.
+_write_queue: asyncio.Queue = asyncio.Queue(maxsize=0)  # unbounded
+WRITE_FLUSH_INTERVAL = float(os.environ.get("WRITE_FLUSH_MS", "50")) / 1000.0
+WRITE_BATCH_SIZE = int(os.environ.get("WRITE_BATCH_SIZE", "200"))
+
+# Auto-prune: delete the oldest DB rows every N seconds (default 20 min).
+PRUNE_INTERVAL_S = int(os.environ.get("FEED_PRUNE_INTERVAL_S", "1200"))
+PRUNE_KEEP_COUNT = int(os.environ.get("FEED_PRUNE_KEEP", "50000"))
 
 JSON_HEADERS = {"Access-Control-Allow-Origin": "*"}
 
@@ -299,6 +323,70 @@ class FanoutPump:
 fanout = FanoutPump()
 
 
+# ── Write-behind flusher ────────────────────────────────────────────────────
+async def _write_flusher() -> None:
+    """Drain _write_queue in batches and INSERT into PostgreSQL.
+
+    Runs forever in the background.  Decouples HTTP response latency from
+    database write latency — callers enqueue and return immediately.
+    """
+    while True:
+        try:
+            batch = []
+            while not _write_queue.empty() and len(batch) < 1000:
+                try:
+                    batch.append(_write_queue.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
+            if batch:
+                try:
+                    await db.batch_insert(batch)
+                except Exception as exc:
+                    log.warning("write-behind flush failed (%d records): %s", len(batch), exc)
+                # If there are still more items waiting, don't sleep — continue immediately
+                if not _write_queue.empty():
+                    await asyncio.sleep(0)
+                    continue
+            await asyncio.sleep(WRITE_FLUSH_INTERVAL)
+        except asyncio.CancelledError:
+            # Flush whatever is left before exiting.
+            remaining = []
+            while not _write_queue.empty():
+                try:
+                    remaining.append(_write_queue.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
+            if remaining:
+                try:
+                    await db.batch_insert(remaining)
+                except Exception:
+                    pass
+            raise
+        except Exception as exc:
+            log.warning("write flusher error: %s", exc)
+
+
+async def _feed_pruner() -> None:
+    """Every PRUNE_INTERVAL_S seconds delete the oldest DB rows.
+
+    Keeps only the newest PRUNE_KEEP_COUNT messages on disk so that the DB
+    never bloats between leaderboard runs.  The in-memory cache is unaffected
+    (it has its own ceiling and eviction), so /feed continues to serve the
+    full history that was received during the current uptime window.
+    """
+    while True:
+        try:
+            await asyncio.sleep(PRUNE_INTERVAL_S)
+            deleted = await db.prune_old_messages(keep_count=PRUNE_KEEP_COUNT)
+            if deleted:
+                log.info("feed pruner: deleted %d old messages from DB (keeping %d)",
+                         deleted, PRUNE_KEEP_COUNT)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("feed pruner error: %s", exc)
+
+
 # ── Lifecycle ────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def on_startup() -> None:
@@ -306,6 +394,9 @@ async def on_startup() -> None:
     db.feed_cache.max_items = FEED_MAX_ITEMS
     await db.feed_cache.sync(force=True)
     sysmetrics.snapshot()  # prime the CPU sampler
+    asyncio.create_task(_write_flusher())
+    if NODE_ID == "Sys2":
+        asyncio.create_task(_feed_pruner())
     log.info("Backend %s ready on port %s (feed cached: %d messages)",
              NODE_ID, MY_PORT, db.feed_cache.item_count())
 
@@ -358,10 +449,13 @@ async def _extract_message(request: Request) -> tuple[str, str, Optional[str]]:
                 pass
         if client_name is None and text is None:
             try:
-                form = await request.form()
-                client_name = form.get("client-name") or form.get("client_name")
-                text = form.get("msg") or form.get("message")
-                message_id = form.get("message_id") or form.get("messageId")
+                # request.body() above already consumed the ASGI receive stream,
+                # so request.form() would return empty. Parse raw bytes directly.
+                from urllib.parse import parse_qs
+                parsed = parse_qs(raw.decode("latin-1"), keep_blank_values=True)
+                client_name = (parsed.get("client-name") or parsed.get("client_name") or [None])[0]
+                text = (parsed.get("msg") or parsed.get("message") or [None])[0]
+                message_id = (parsed.get("message_id") or parsed.get("messageId") or [None])[0]
             except Exception:
                 pass
 
@@ -387,6 +481,10 @@ async def _extract_message(request: Request) -> tuple[str, str, Optional[str]]:
 @app.post("/message/")
 @app.get("/message/")
 async def post_message(request: Request) -> Response:
+    """Accept a message, add it to the in-memory feed immediately, and enqueue
+    the DB write for the background flusher.  The caller gets a 200 response
+    in ~1 ms regardless of current database load.
+    """
     client_name, text, message_id = await _extract_message(request)
     if not text.strip():
         load.errors += 1
@@ -395,38 +493,59 @@ async def post_message(request: Request) -> Response:
                                 "node_id": NODE_ID}),
             status_code=400, media_type="application/json", headers=JSON_HEADERS)
 
-    record = await db.save_message(
-        room_id=HTTP_ROOM_ID,
-        sender=client_name,
-        sender_id=f"http-{client_name}",
-        text=text,
-        timestamp=int(time.time() * 1000),
-        message_id=message_id,
-    )
+    # ── Fast path: encrypt + sign in memory, no DB round-trip ────────────────
+    msg_id = str(message_id) if message_id else str(uuid.uuid4())
+    ts = int(time.time() * 1000)
+    ciphertext, nonce = crypto.encrypt_message(text)
+    signature, public_key = crypto.sign_and_pubkey(client_name, text)
 
-    if record["duplicate"]:
-        load.duplicates += 1
-    else:
-        load.total_messages += 1
-        await db.feed_cache.add_local(record)
-        if manager.client_count():
-            await manager.broadcast_to_room(HTTP_ROOM_ID, {
-                "type": "message",
-                "id": record["id"],
-                "roomId": HTTP_ROOM_ID,
-                "sender": client_name,
-                "senderId": record["senderId"],
-                "text": record["text"],
-                "timestamp": record["timestamp"],
-                "verified": True,
-                "tampered": False,
-            })
+
+    record = {
+        "id": msg_id,
+        "seq": None,
+        "room_id": HTTP_ROOM_ID,
+        "sender": client_name,
+        "senderId": f"http-{client_name}",
+        "text": text,
+        "timestamp": ts,
+        "verified": True,
+        "tampered": False,
+        "duplicate": False,
+        # Fields needed by batch_insert
+        "message_id": msg_id,
+        "sender_id": f"http-{client_name}",
+        "ciphertext": ciphertext,
+        "nonce": nonce,
+        "signature": signature,
+        "sender_public_key": public_key,
+        "origin_node": NODE_ID,
+    }
+
+    # Add to feed cache immediately so /feed reflects it without waiting for DB.
+    await db.feed_cache.add_local(record)
+    load.total_messages += 1
+
+    # Enqueue DB write — the _write_flusher coroutine will batch-insert shortly.
+    _write_queue.put_nowait(record)
+
+    if manager.client_count():
+        await manager.broadcast_to_room(HTTP_ROOM_ID, {
+            "type": "message",
+            "id": msg_id,
+            "roomId": HTTP_ROOM_ID,
+            "sender": client_name,
+            "senderId": record["senderId"],
+            "text": text,
+            "timestamp": ts,
+            "verified": True,
+            "tampered": False,
+        })
 
     body = json.dumps({
         "status": "ok",
-        "message_id": record["id"],
-        "duplicate": record["duplicate"],
-        "timestamp": record["timestamp"],
+        "message_id": msg_id,
+        "duplicate": False,
+        "timestamp": ts,
         "node_id": NODE_ID,
     }, separators=(",", ":"))
     return Response(content=body, media_type="application/json", headers=JSON_HEADERS)

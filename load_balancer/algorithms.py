@@ -82,14 +82,16 @@ class BackendNode:
                 return True
             return False
 
-    def mark_unhealthy(self) -> None:
+    def mark_unhealthy(self, threshold: int = 3) -> bool:
         """Passive failure detection: a proxied request could not be delivered."""
         with self._lock:
             self.consecutive_successes = 0
             self.consecutive_failures += 1
-            if self.is_healthy:
+            if self.is_healthy and self.consecutive_failures >= threshold:
                 self.is_healthy = False
                 self.last_state_change = time.time()
+                return True
+            return False
 
     # ---- request accounting ------------------------------------------------
     def begin_request(self) -> None:
@@ -238,6 +240,12 @@ class AdaptiveThresholdAlgorithm(LoadBalancerAlgorithm):
         with self._lock:
             healthy = [n for n in self.nodes if n.is_healthy]
             if not healthy:
+                # Never refuse 100% of client traffic if backends exist:
+                # fall back to the least-loaded node among all nodes.
+                if self.nodes:
+                    best = min(self.nodes, key=lambda n: n.load_score(self.cfg))
+                    self._current = best
+                    return best
                 self._current = None
                 return None
 

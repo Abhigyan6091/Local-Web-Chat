@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lab 6 Leaderboard</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1><a href="/">Lab 6 &mdash; Load Balancer Leaderboard</a></h1>
+</header>
+<main>
+
+
+<section class="card">
+  <h2>Submit your load balancer</h2>
+  <form id="submit-form" autocomplete="off" data-roster="on">
+    <div class="fields">
+      <label>Roll ID <input name="roll_id" required maxlength="40" placeholder="e.g. 12340040"></label>
+      <label>Name
+        
+        <input name="name" readonly tabindex="-1" placeholder="looked up from roll ID">
+        
+      </label>
+      <label>Load balancer URL <input name="url" required placeholder="http://10.1.75.55:8080"></label>
+      <button type="submit" disabled>Run test</button>
+    </div>
+  </form>
+  <p id="submit-msg" class="msg"></p>
+  
+  <p class="note">Only roll numbers on the class roster (73 students) can submit; your name is filled in automatically.</p>
+  
+  <p class="note">
+    One submission is tested on <strong>both</strong> boards, back to back against the
+    same deployment, using <code>/message</code> and <code>/feed</code>.
+    One submission per roll ID every 30m.
+  </p>
+</section>
+
+<section class="card legend">
+  <h2>What the tags mean</h2>
+  <p class="note">
+    Your two rows always come from your <strong>latest finished submission</strong> &mdash; the same
+    run on both boards. While a new run is in progress your previous result stays up.
+  </p>
+  <dl class="legend-list">
+    <dt><span class="badge feed">feed 19012/19012 (100.0%)</span></dt>
+    <dd>Of the messages your server accepted with a 2xx, how many came back out of
+        <code>/feed</code> at the end. This is the persistence check &mdash; <strong>both boards sort on
+        it first</strong>.</dd>
+
+    <dt><span class="badge incomplete">feed unavailable</span></dt>
+    <dd><code>/feed</code> could not be read (timed out, errored, or exceeded the scan cap), so
+        nothing could be verified. Placed at <strong>rank 99</strong>.</dd>
+
+    <dt><span class="badge incomplete">no accepted messages</span></dt>
+    <dd>Your server accepted no message at all during the run, so there is nothing to verify.
+        Placed at <strong>rank 99</strong>.</dd>
+
+    <dt><span class="badge correct">correct 100/100 (100.0%)</span></dt>
+    <dd>A random sample of stored messages re-read from <code>/feed</code> and compared
+        byte-for-byte with what was sent. Catches truncated, re-encoded or mangled text.</dd>
+
+    <dt><span class="badge incomplete">correctness: rerun required</span></dt>
+    <dd>The run predates the content checker. Submit again to get a correctness score.</dd>
+
+    <dt><span class="badge incomplete">incomplete</span></dt>
+    <dd>A stage could not be handed its full request budget in the time allowed, so this run did
+        less work than everyone else. Its numbers are real but not directly comparable.</dd>
+
+    <dt><span class="badge running">running</span> / <span class="badge running">queued</span></dt>
+    <dd>Currently being tested, or waiting its turn. One run executes at a time.</dd>
+
+    <dt><span class="badge invalid">invalid</span> / <span class="badge error">error</span></dt>
+    <dd>The URL failed preflight (unreachable, missing a route), or the harness itself failed.
+        Not ranked. A preflight rejection does not use up your cooldown.</dd>
+
+    <dt><strong>rank 99</strong></dt>
+    <dd>Reserved for runs whose feed could not be verified at all. They sort below every ranked
+        run, and the ordering among them is not meaningful.</dd>
+  </dl>
+
+  <h3>Marks</h3>
+  <p class="note">
+    Your <strong>mean rank</strong> is the average of your rank on the two boards
+    (a rank of 99 counts as 99). Bands are upper-inclusive &mdash; a mean rank of 7.5 falls in the
+    8&ndash;15 band.
+  </p>
+  <table class="marks-key">
+    <thead><tr><th>Mean rank</th><th class="num">Marks</th></tr></thead>
+    <tbody>
+      
+      <tr><td>1 – 7</td><td class="num">15</td></tr>
+      
+      <tr><td>8 – 15</td><td class="num">12</td></tr>
+      
+      <tr><td>16 – 30</td><td class="num">10</td></tr>
+      
+      <tr><td>31 – 72</td><td class="num">7</td></tr>
+      
+      <tr><td>above 72 (including 99)</td><td class="num">5</td></tr>
+      
+    </tbody>
+  </table>
+  <p class="note">
+    <strong>+ 5 marks for the report</strong>, assessed separately from the
+    leaderboard.
+  </p>
+</section>
+
+<p id="queue-strip" class="queue">&nbsp;</p>
+
+<section class="board">
+  <h2>1 &middot; Static load {Ignore Incomplete TAG}</h2>
+  <p class="note board-note">
+    Fixed ladder of 250 &rarr; 500 &rarr; 750 &rarr; 1000 concurrent users, each stage
+    sending up to 5000 requests (20000 total budget) with the same
+    message content for every submission.
+    Ranked on <strong>feed %</strong>, then <strong>error %</strong>, then
+    <strong>mean response time</strong>, then <strong>correctness</strong>.
+  </p>
+  <table data-board="static">
+    <thead><tr>
+      <th>#</th><th>Name</th><th>Roll ID</th>
+      <th class="num">Mean ms</th><th class="num">Err %</th>
+      <th class="num">Requests</th>
+      <th class="num">Complete %</th><th class="num">Runs</th><th>Last run</th><th></th>
+    </tr></thead>
+    <tbody><tr><td colspan="10" class="empty">loading&hellip;</td></tr></tbody>
+  </table>
+</section>
+
+<section class="board">
+  <h2>2 &middot; Breakpoint</h2>
+  <p class="note board-note">
+    Ramps 200 &rarr; 350 &rarr; 500 &rarr; 750 &rarr; 1000 &rarr; 1500 &rarr; 2000 &rarr; 2500 concurrent users (capped at
+    2500), each stage sending up to 5000 requests with the
+    the same message pool, and stops as soon as a stage exceeds
+    <strong>20% errors</strong>.
+    Ranked on <strong>feed %</strong>, then <strong>total successful requests</strong> served
+    before breaking. A backend that has stored nothing after stage 1 is stopped there.
+  </p>
+  <table data-board="breakpoint">
+    <thead><tr>
+      <th>#</th><th>Name</th><th>Roll ID</th>
+      <th class="num">Successful reqs</th><th class="num">Broke at</th>
+      <th class="num">Peak req/s</th><th class="num">Mean ms</th>
+      <th class="num">Complete %</th><th class="num">Runs</th><th>Last run</th><th></th>
+    </tr></thead>
+    <tbody><tr><td colspan="11" class="empty">loading&hellip;</td></tr></tbody>
+  </table>
+</section>
+
+
+<section class="board">
+  <h2>3 &middot; Marks</h2>
+  <p class="note board-note">
+    Mean rank across both boards, and the marks it falls into. Report marks
+    (5) are assessed separately and are not included here.
+  </p>
+  <table data-board="marks">
+    <thead><tr>
+      <th>Name</th><th>Roll ID</th>
+      <th class="num">Static rank</th><th class="num">Breakpoint rank</th>
+      <th class="num">Mean rank</th><th class="num">Marks</th><th class="num">Runs</th>
+    </tr></thead>
+    <tbody><tr><td colspan="7" class="empty">loading&hellip;</td></tr></tbody>
+  </table>
+</section>
+
+
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>

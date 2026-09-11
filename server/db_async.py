@@ -323,6 +323,16 @@ class FeedCache:
             self._last_sync = now
             wm = self._watermark
             async with pool().acquire() as conn:
+                if wm > 0:
+                    max_db_seq = await conn.fetchval("SELECT coalesce(max(seq), 0) FROM messages")
+                    if max_db_seq < wm:
+                        self._items.clear()
+                        self._seen.clear()
+                        self._body = bytearray()
+                        self._watermark = 0
+                        self._max_seq = 0
+                        self._cached = self._cached_gzip = None
+                        wm = 0
                 rows = await conn.fetch(SYNC_SQL, wm)
             self.syncs += 1
             if not rows:
@@ -456,3 +466,59 @@ feed_cache = FeedCache()
 async def count_messages() -> int:
     async with pool().acquire() as conn:
         return await conn.fetchval("SELECT count(*) FROM messages")
+
+
+async def batch_insert(records: list) -> int:
+    """Insert a batch of pre-encrypted message records in one transaction.
+
+    Each element of *records* must be a dict with keys:
+        message_id, room_id, sender, sender_id, ciphertext, nonce,
+        signature, sender_public_key, timestamp, origin_node
+
+    Returns the number of rows actually inserted (duplicates are silently
+    ignored via ON CONFLICT DO NOTHING).
+    """
+    if not records:
+        return 0
+    async with pool().acquire() as conn:
+        result = await conn.executemany(
+            """INSERT INTO messages
+               (message_id, room_id, sender, sender_id, ciphertext, nonce,
+                signature, sender_public_key, timestamp, origin_node)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+               ON CONFLICT (message_id) DO NOTHING""",
+            [
+                (
+                    r["message_id"], r["room_id"], r["sender"], r["sender_id"],
+                    r["ciphertext"], r["nonce"], r["signature"],
+                    r["sender_public_key"], r["timestamp"], r["origin_node"],
+                )
+                for r in records
+            ],
+        )
+    # asyncpg executemany returns a status string like "INSERT 0 N"
+    try:
+        return int(str(result).split()[-1])
+    except Exception:
+        return len(records)
+
+
+async def prune_old_messages(keep_count: int = 50_000) -> int:
+    """Delete the oldest rows from the messages table, keeping *keep_count*.
+
+    Returns the number of rows deleted.
+    """
+    async with pool().acquire() as conn:
+        cutoff = await conn.fetchval(
+            """SELECT seq FROM messages ORDER BY seq DESC
+               OFFSET $1 LIMIT 1""",
+            keep_count,
+        )
+        if cutoff is None:
+            return 0          # fewer than keep_count rows — nothing to delete
+        result = await conn.execute("DELETE FROM messages WHERE seq < $1", cutoff)
+        try:
+            return int(str(result).split()[-1])
+        except Exception:
+            return 0
+
