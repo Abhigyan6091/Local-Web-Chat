@@ -80,7 +80,7 @@ HOP_BY_HOP = {
 }
 
 MAX_HEAD = 64 * 1024
-RELAY_CHUNK = 64 * 1024
+RELAY_CHUNK = 32 * 1024
 
 
 # ── HTTP helpers ─────────────────────────────────────────────────────────────
@@ -214,10 +214,17 @@ def build_upgrade_request(head: HttpHead, node: BackendNode, client_ip: str) -> 
 class ConnectionPool:
     """Keep-alive sockets per backend; avoids a TCP handshake per request."""
 
-    def __init__(self, max_idle: int = 256, max_idle_age: float = 20.0):
+    def __init__(self, max_idle: int = 48, max_idle_age: float = 15.0, max_concurrent: int = 48):
         self._idle: Dict[str, Deque[Tuple[asyncio.StreamReader, asyncio.StreamWriter, float]]] = {}
         self.max_idle = max_idle
         self.max_idle_age = max_idle_age
+        self.max_concurrent = max_concurrent
+        self._semaphores: Dict[str, asyncio.Semaphore] = {}
+
+    def get_semaphore(self, node_id: str) -> asyncio.Semaphore:
+        if node_id not in self._semaphores:
+            self._semaphores[node_id] = asyncio.Semaphore(self.max_concurrent)
+        return self._semaphores[node_id]
 
     async def acquire(self, node: BackendNode, timeout: float):
         q = self._idle.get(node.node_id)
@@ -231,7 +238,7 @@ class ConnectionPool:
             except Exception:
                 pass
         return await asyncio.wait_for(
-            asyncio.open_connection(node.host, node.port), timeout=timeout)
+            asyncio.open_connection(node.host, node.port, limit=32768), timeout=timeout)
 
     def release(self, node: BackendNode, reader, writer) -> None:
         if writer.is_closing() or reader.at_eof():
@@ -270,7 +277,7 @@ class LoadBalancer:
                  threshold: float = 0.55, release_ratio: float = 0.80,
                  score_cfg: Optional[ScoreConfig] = None,
                  health_interval: float = 1.0, health_timeout: float = 1.0,
-                 connect_timeout: float = 5.0, request_timeout: float = 30.0,
+                 connect_timeout: float = 2.0, request_timeout: float = 12.0,
                  retry_attempts: int = 3, static_dir: Optional[str] = None):
         self.host, self.port = host, port
         self.nodes = nodes
@@ -283,7 +290,7 @@ class LoadBalancer:
         self.connect_timeout = connect_timeout
         self.request_timeout = request_timeout
         self.retry_attempts = max(1, retry_attempts)
-        self.pool = ConnectionPool()
+        self.pool = ConnectionPool(max_idle=64, max_idle_age=15.0)
 
         self.start_time = time.time()
         self.request_count = 0
@@ -568,6 +575,13 @@ class LoadBalancer:
                 node = min(alt, key=lambda n: n.load_score(self.score_cfg))
             tried.append(node.node_id)
 
+            sem = self.pool.get_semaphore(node.node_id)
+            try:
+                await asyncio.wait_for(sem.acquire(), timeout=self.connect_timeout)
+            except asyncio.TimeoutError:
+                last_error = f"{node.node_id} at concurrency capacity"
+                continue
+
             node.begin_request()
             t_node = time.perf_counter()
             backend_reader = backend_writer = None
@@ -619,6 +633,8 @@ class LoadBalancer:
                 self.retry_count += 1
                 logger.warning("[FAILOVER] %s failed on %s %s (%s) — trying another backend",
                                node.node_id, head.method, head.path, last_error)
+            finally:
+                sem.release()
 
         # If all retries failed, attempt one emergency fallback to the least-loaded backend
         if self.nodes and not sent_any:
@@ -809,13 +825,32 @@ class LoadBalancer:
         await writer.drain()
         return True
 
+    @staticmethod
+    async def _memory_trimmer() -> None:
+        try:
+            import ctypes
+            _libc = ctypes.CDLL("libc.so.6")
+            _has_trim = hasattr(_libc, "malloc_trim")
+        except Exception:
+            _has_trim = False
+        while True:
+            try:
+                await asyncio.sleep(10)
+                if _has_trim:
+                    _libc.malloc_trim(0)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+
     # ---- run ---------------------------------------------------------------
     async def serve(self) -> None:
         sysmetrics.snapshot()
         asyncio.create_task(self.health_loop())
+        asyncio.create_task(self._memory_trimmer())
         server = await asyncio.start_server(
             self.handle_client, self.host, self.port, backlog=2048,
-            reuse_address=True)
+            limit=32768, reuse_address=True)
         logger.info("=" * 68)
         logger.info("Sys1 Load Balancer listening on http://%s:%d", self.host, self.port)
         logger.info("Algorithm      : %s (threshold=%s)", self.algorithm_name,

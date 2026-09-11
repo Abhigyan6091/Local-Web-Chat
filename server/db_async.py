@@ -522,3 +522,16 @@ async def prune_old_messages(keep_count: int = 50_000) -> int:
         except Exception:
             return 0
 
+
+async def truncate_messages() -> None:
+    """Truncate the messages table and reset identity sequence."""
+    async with pool().acquire() as conn:
+        await conn.execute("TRUNCATE TABLE messages RESTART IDENTITY;")
+    async with feed_cache._lock:
+        feed_cache._items.clear()
+        feed_cache._seen.clear()
+        feed_cache._body = bytearray()
+        feed_cache._watermark = 0
+        feed_cache._max_seq = 0
+        feed_cache._cached = feed_cache._cached_gzip = None
+

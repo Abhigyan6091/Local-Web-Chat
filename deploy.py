@@ -122,12 +122,15 @@ def write_file(sftp, content: str, remote: str) -> None:
 # ── supervised launcher ──────────────────────────────────────────────────────
 SUPERVISOR = """#!/bin/bash
 ulimit -n 65535 2>/dev/null || true
+export MALLOC_ARENA_MAX=2
+export MALLOC_TRIM_THRESHOLD_=131072
 # Restarts the service if it ever exits, so a crash does not take the node out
 # of the cluster for the rest of the evaluation window.
 LOG="$1"; shift
 while true; do
     "$@" >> "$LOG" 2>&1
-    echo "[supervisor] service exited at $(date), restarting in 2s" >> "$LOG"
+    RET=$?
+    echo "[supervisor] service exited with code $RET at $(date), restarting in 2s" >> "$LOG"
     sleep 2
 done
 """
@@ -137,6 +140,8 @@ def start_supervised(client, sftp, name: str, log: str, command: str,
                      env: str = "") -> None:
     script = (f"#!/bin/bash\n"
               f"ulimit -n 65535 2>/dev/null || true\n"
+              f"export MALLOC_ARENA_MAX=2\n"
+              f"export MALLOC_TRIM_THRESHOLD_=131072\n"
               f"cd {REMOTE_DIR}\n{env}\n"
               f"exec bash {REMOTE_DIR}/supervisor.sh {log} {command}\n")
     path = f"{REMOTE_DIR}/start_{name}.sh"
@@ -157,6 +162,8 @@ def stop_services(client) -> None:
         "pkill -f '[s]upervisor.sh' 2>/dev/null; "
         "pkill -f '[b]alancer.py' 2>/dev/null; "
         "pkill -f '[u]vicorn' 2>/dev/null; "
+        "pkill -f 'pond_backend' 2>/dev/null; "
+        "pkill -f '/opt/conda/bin/python3' 2>/dev/null; "
         "sleep 1; "
         # Anything still bound to the service port goes too.
         f"for pid in $(ss -tlnp 2>/dev/null | grep ':{SERVICE_PORT} ' "

@@ -87,7 +87,11 @@ WRITE_BATCH_SIZE = int(os.environ.get("WRITE_BATCH_SIZE", "200"))
 
 # Auto-prune: delete the oldest DB rows every N seconds (default 20 min).
 PRUNE_INTERVAL_S = int(os.environ.get("FEED_PRUNE_INTERVAL_S", "1200"))
-PRUNE_KEEP_COUNT = int(os.environ.get("FEED_PRUNE_KEEP", "50000"))
+PRUNE_KEEP_COUNT = int(os.environ.get("FEED_PRUNE_KEEP", "15000"))
+
+# Auto-truncate: truncate table if system is idle for AUTO_TRUNCATE_IDLE_S seconds (15-20 min).
+AUTO_TRUNCATE_IDLE_S = int(os.environ.get("AUTO_TRUNCATE_IDLE_S", "900"))
+_last_message_time: float = time.time()
 
 JSON_HEADERS = {"Access-Control-Allow-Origin": "*"}
 
@@ -387,6 +391,49 @@ async def _feed_pruner() -> None:
             log.warning("feed pruner error: %s", exc)
 
 
+async def _auto_truncator() -> None:
+    """If the system has been idle (no messages posted) for AUTO_TRUNCATE_IDLE_S (15-20 min),
+    truncate the messages table and reset identity so subsequent leaderboard runs start clean.
+    """
+    global _last_message_time
+    while True:
+        try:
+            await asyncio.sleep(30)
+            idle_seconds = time.time() - _last_message_time
+            if idle_seconds >= AUTO_TRUNCATE_IDLE_S:
+                row_count = await db.count_messages()
+                if row_count > 0:
+                    log.info("[AUTO-TRUNCATE] System idle for %.0f s with %d messages; truncating...",
+                             idle_seconds, row_count)
+                    await db.truncate_messages()
+                    _last_message_time = time.time()
+                    log.info("[AUTO-TRUNCATE] Messages table truncated cleanly.")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("[AUTO-TRUNCATE] error: %s", exc)
+
+
+async def _memory_trimmer() -> None:
+    """Periodically return unused heap memory to the Linux kernel."""
+    try:
+        import ctypes
+        _libc = ctypes.CDLL("libc.so.6")
+        _has_trim = hasattr(_libc, "malloc_trim")
+    except Exception:
+        _has_trim = False
+
+    while True:
+        try:
+            await asyncio.sleep(15)
+            if _has_trim:
+                _libc.malloc_trim(0)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+
+
 # ── Lifecycle ────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def on_startup() -> None:
@@ -395,8 +442,10 @@ async def on_startup() -> None:
     await db.feed_cache.sync(force=True)
     sysmetrics.snapshot()  # prime the CPU sampler
     asyncio.create_task(_write_flusher())
+    asyncio.create_task(_memory_trimmer())
     if NODE_ID == "Sys2":
         asyncio.create_task(_feed_pruner())
+        asyncio.create_task(_auto_truncator())
     log.info("Backend %s ready on port %s (feed cached: %d messages)",
              NODE_ID, MY_PORT, db.feed_cache.item_count())
 
@@ -527,6 +576,8 @@ async def post_message(request: Request) -> Response:
 
     # Enqueue DB write — the _write_flusher coroutine will batch-insert shortly.
     _write_queue.put_nowait(record)
+    global _last_message_time
+    _last_message_time = time.time()
 
     if manager.client_count():
         await manager.broadcast_to_room(HTTP_ROOM_ID, {
@@ -549,6 +600,19 @@ async def post_message(request: Request) -> Response:
         "node_id": NODE_ID,
     }, separators=(",", ":"))
     return Response(content=body, media_type="application/json", headers=JSON_HEADERS)
+
+
+@app.post("/admin/truncate")
+@app.get("/admin/truncate")
+async def admin_truncate() -> Response:
+    """Manually truncate messages table and reset feed cache."""
+    await db.truncate_messages()
+    global _last_message_time
+    _last_message_time = time.time()
+    log.info("[ADMIN] messages truncated via API on %s", NODE_ID)
+    return Response(
+        content=json.dumps({"status": "ok", "message": "messages truncated", "node_id": NODE_ID}),
+        media_type="application/json", headers=JSON_HEADERS)
 
 
 @app.get("/feed")
